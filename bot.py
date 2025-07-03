@@ -124,16 +124,20 @@ async def on_message(message):
     # 讓其他指令繼續被處理
     await bot.process_commands(message)
 
+# 台灣時區設定
+TW_TZ = timezone(timedelta(hours=8))
+
 @bot.tree.command(name="createvc", description="建立匿名語音頻道（指定開始時間）", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(members="標註的成員們", minutes="存在時間（分鐘）", start_time="幾點幾分後啟動 (格式: HH:MM, 24hr)", limit="人數上限")
 async def createvc(interaction: discord.Interaction, members: str, minutes: int, start_time: str, limit: int = 2):
     await interaction.response.defer()
     try:
         hour, minute = map(int, start_time.split(":"))
-        now = datetime.now(timezone.utc)  # 改成用 UTC 時間
+        now = datetime.now(TW_TZ)  # 使用台灣時間
         start_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if start_dt < now:
             start_dt += timedelta(days=1)
+        start_dt_utc = start_dt.astimezone(timezone.utc)  # 轉換成 UTC 時區
     except:
         await interaction.followup.send("❗ 時間格式錯誤，請使用 HH:MM 24 小時制。")
         return
@@ -148,10 +152,10 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
     animal = random.choice(ANIMALS)
     animal_channel_name = f"{animal}頻道"
 
-    await interaction.followup.send(f"✅ 已排程配對頻道：`{animal_channel_name}` 將於 <t:{int(start_dt.timestamp())}:t> 開啟")
+    await interaction.followup.send(f"✅ 已排程配對頻道：`{animal_channel_name}` 將於 <t:{int(start_dt_utc.timestamp())}:t> 開啟")
 
     async def countdown():
-        await asyncio.sleep((start_dt - datetime.now(timezone.utc)).total_seconds())
+        await asyncio.sleep((start_dt_utc - datetime.now(timezone.utc)).total_seconds())
 
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
