@@ -1,0 +1,5 @@
+discord.py
+python-dotenv
+sqlalchemy
+psycopg2-binary
+Flask
