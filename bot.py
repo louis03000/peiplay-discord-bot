@@ -1,5 +1,3 @@
-# bot.py 最終完整版：包含所有功能與修正 + /report
-
 import os
 import asyncio
 import random
@@ -10,7 +8,7 @@ from discord.ui import View, Button, Modal, TextInput
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify
 import threading
 
@@ -51,14 +49,16 @@ active_voice_channels = {}
 evaluated_records = set()
 
 ANIMALS = ["🦊 狐狸", "🐱 貓咪", "🐶 小狗", "🐻 熊熊", "🐼 貓熊", "🐯 老虎", "🦁 獅子", "🐸 青蛙", "🐵 猴子"]
-#封鎖名單
+
+# 封鎖名單
 class BlockRecord(Base):
     __tablename__ = 'block_records'
     id = Column(Integer, primary_key=True)
     blocker_id = Column(String)
     blocked_id = Column(String)
-    
+
 Base.metadata.create_all(engine)
+
 # --- 評分 Modal ---
 class RatingModal(Modal, title="匿名評分與留言"):
     rating = TextInput(label="給予評分（1～5 星）", required=True)
@@ -123,13 +123,14 @@ async def on_message(message):
 
     # 讓其他指令繼續被處理
     await bot.process_commands(message)
+
 @bot.tree.command(name="createvc", description="建立匿名語音頻道（指定開始時間）", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(members="標註的成員們", minutes="存在時間（分鐘）", start_time="幾點幾分後啟動 (格式: HH:MM, 24hr)", limit="人數上限")
 async def createvc(interaction: discord.Interaction, members: str, minutes: int, start_time: str, limit: int = 2):
     await interaction.response.defer()
     try:
         hour, minute = map(int, start_time.split(":"))
-        now = datetime.now()
+        now = datetime.now(timezone.utc)  # 改成用 UTC 時間
         start_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if start_dt < now:
             start_dt += timedelta(days=1)
@@ -150,7 +151,7 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
     await interaction.followup.send(f"✅ 已排程配對頻道：`{animal_channel_name}` 將於 <t:{int(start_dt.timestamp())}:t> 開啟")
 
     async def countdown():
-        await asyncio.sleep((start_dt - datetime.now()).total_seconds())
+        await asyncio.sleep((start_dt - datetime.now(timezone.utc)).total_seconds())
 
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -227,7 +228,8 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
             print(f"❌ 倒數錯誤: {e}")
 
     bot.loop.create_task(countdown())
-    #封鎖動作
+
+# 封鎖動作
 @bot.tree.command(name="viewblocklist", description="查看你封鎖的使用者", guild=discord.Object(id=GUILD_ID))
 async def view_blocklist(interaction: discord.Interaction):
     with Session() as s:
@@ -238,7 +240,8 @@ async def view_blocklist(interaction: discord.Interaction):
 
         blocked_mentions = [f"<@{b.blocked_id}>" for b in blocks]
         await interaction.response.send_message(f"🔒 你封鎖的使用者：\n" + "\n".join(blocked_mentions), ephemeral=True)
-        #解除封鎖
+
+# 解除封鎖
 @bot.tree.command(name="unblock", description="解除你封鎖的某人", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="要解除封鎖的使用者")
 async def unblock(interaction: discord.Interaction, member: discord.Member):
@@ -250,6 +253,7 @@ async def unblock(interaction: discord.Interaction, member: discord.Member):
             await interaction.response.send_message(f"✅ 已解除對 <@{member.id}> 的封鎖。", ephemeral=True)
         else:
             await interaction.response.send_message("❗ 你沒有封鎖這位使用者。", ephemeral=True)
+
 # --- /report 舉報功能 ---
 @bot.tree.command(name="report", description="舉報不當行為", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="被舉報的使用者", reason="舉報原因")
