@@ -36,6 +36,14 @@ class PairingRecord(Base):
     comment = Column(String, nullable=True)
     animal_name = Column(String)
 
+class Rating(Base):
+    __tablename__ = 'ratings'
+    id = Column(Integer, primary_key=True)
+    pairing_id = Column(Integer)
+    rater_id = Column(String)
+    rating = Column(Integer)
+    comment = Column(String)
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -70,14 +78,24 @@ class RatingModal(Modal, title="匿名評分與留言"):
     async def on_submit(self, interaction: discord.Interaction):
         try:
             record = session.get(PairingRecord, self.record_id)
-            record.rating = int(str(self.rating))
-            record.comment = str(self.comment)
+            new_rating = Rating(
+                pairing_id=self.record_id,
+                rater_id=str(interaction.user.id),
+                rating=int(str(self.rating)),
+                comment=str(self.comment)
+            )
+            session.add(new_rating)
             session.commit()
+
             await interaction.response.send_message("✅ 感謝你的匿名評價！", ephemeral=True)
 
             admin = bot.get_channel(ADMIN_CHANNEL_ID)
             if admin:
-                await admin.send(f"⭐ 評分：{record.rating} 星\n💬 留言：{record.comment or '（無留言）'}\n👤 配對：<@{record.user1_id}> × <@{record.user2_id}>")
+                await admin.send(
+                    f"⭐ 評分：{new_rating.rating} 星\n"
+                    f"💬 留言：{new_rating.comment or '（無留言）'}\n"
+                    f"👤 配對：<@{record.user1_id}> × <@{record.user2_id}>"
+                )
 
             evaluated_records.add(self.record_id)
         except Exception as e:
