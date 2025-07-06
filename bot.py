@@ -210,12 +210,13 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
                 await user.move_to(vc)
 
         try:
-            while active_voice_channels[vc.id]['remaining'] > 60:
-                await asyncio.sleep(60)
-                active_voice_channels[vc.id]['remaining'] -= 60
+            while active_voice_channels[vc.id]['remaining'] > 0:
+                # 發出剩餘 60 秒提醒
+                if active_voice_channels[vc.id]['remaining'] == 60:
+                    await text_channel.send("⏰ 剩餘 1 分鐘。")
 
-            await text_channel.send("⏰ 剩餘 1 分鐘。")
-            await asyncio.sleep(60)
+                await asyncio.sleep(1)
+                active_voice_channels[vc.id]['remaining'] -= 1
             await vc.delete()
             await text_channel.send("📝 請點擊以下按鈕進行匿名評分。")
 
