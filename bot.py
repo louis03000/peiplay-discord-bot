@@ -36,7 +36,6 @@ class PairingRecord(Base):
     comment = Column(String, nullable=True)
     animal_name = Column(String)
 
-Base.metadata.create_all(engine)
 
 intents = discord.Intents.default()
 intents.message_content = True
