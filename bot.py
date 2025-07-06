@@ -94,7 +94,8 @@ class RatingModal(Modal, title="匿名評分與留言"):
                 await admin.send(
                     f"⭐ 評分：{new_rating.rating} 星\n"
                     f"💬 留言：{new_rating.comment or '（無留言）'}\n"
-                    f"👤 配對：<@{record.user1_id}> × <@{record.user2_id}>"
+                    f"👤 配對：<@{record.user1_id}> × <@{record.user2_id}>\n"
+                    f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration // 60} 分鐘 | 延長 {record.extended_times} 次"
                 )
 
             evaluated_records.add(self.record_id)
@@ -241,9 +242,9 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
             record.duration += record.extended_times * 600
             session.commit()
 
-            admin = bot.get_channel(ADMIN_CHANNEL_ID)
-            if admin:
-                await admin.send(f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次")
+            #admin = bot.get_channel(ADMIN_CHANNEL_ID)
+            #if admin:
+                #await admin.send(f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次")
 
             active_voice_channels.pop(vc.id, None)
         except Exception as e:
