@@ -100,8 +100,11 @@ class RatingModal(Modal, title="匿名評分與留言"):
 
             evaluated_records.add(self.record_id)
         except Exception as e:
+            print(f"❌ 評分推送失敗：{e}")  # 加這行印出錯誤 log
+            admin = bot.get_channel(ADMIN_CHANNEL_ID)
+            if admin:
+                await admin.send(f"❗ 評分提交錯誤：{e}")
             await interaction.response.send_message(f"❌ 提交失敗：{e}", ephemeral=True)
-
 # --- 延長按鈕 ---
 class ExtendView(View):
     def __init__(self, vc_id):
