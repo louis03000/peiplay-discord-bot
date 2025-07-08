@@ -433,6 +433,10 @@ def create_vc():
     bot.loop.create_task(schedule_vc())
     return jsonify({"status": "ok"})
 
-threading.Thread(target=run_flask, daemon=True).start()
+if __name__ == "__main__":
+    # 啟動 Flask
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.start()
 
-bot.run(TOKEN)
+    # 啟動 Discord bot（會阻塞直到關閉）
+    bot.run(TOKEN)
