@@ -336,6 +336,102 @@ def move_user():
 # --- 啟動 Flask 在子執行緒 ---
 def run_flask():
     app.run(host="0.0.0.0", port=5000)
+@app.route("/create_vc", methods=["POST"])
+def create_vc():
+    data = request.get_json()
+    customer_id = int(data["customer_id"])
+    partner_id = int(data["partner_id"])
+    start_time = datetime.fromisoformat(data["start_time"])
+    duration = int(data["duration"])
+
+    async def schedule_vc():
+        await asyncio.sleep((start_time - datetime.utcnow()).total_seconds())
+        guild = bot.get_guild(GUILD_ID)
+        customer = guild.get_member(customer_id)
+        partner = guild.get_member(partner_id)
+
+        animal = random.choice(ANIMALS)
+        animal_channel_name = f"{animal}頻道"
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            customer: discord.PermissionOverwrite(view_channel=True, connect=True),
+            partner: discord.PermissionOverwrite(view_channel=True, connect=True),
+        }
+
+        category = discord.utils.get(guild.categories, name="語音頻道")
+        vc = await guild.create_voice_channel(name=animal_channel_name, overwrites=overwrites, user_limit=2, category=category)
+        text_channel = await guild.create_text_channel(name="🔒匿名文字區", overwrites=overwrites, category=category)
+
+        record = PairingRecord(
+            user1_id=str(customer.id),
+            user2_id=str(partner.id),
+            duration=duration,
+            animal_name=animal
+        )
+        session.add(record)
+        session.commit()
+
+        active_voice_channels[vc.id] = {
+            'text_channel': text_channel,
+            'remaining': duration,
+            'extended': 0,
+            'record_id': record.id,
+            'vc': vc
+        }
+
+        view = ExtendView(vc.id)
+        await text_channel.send(f"🎉 語音頻道 `{animal_channel_name}` 已開啟！\n⏳ 可延長。", view=view)
+
+        if customer.voice and customer.voice.channel:
+            await customer.move_to(vc)
+        if partner.voice and partner.voice.channel:
+            await partner.move_to(vc)
+
+        try:
+            while active_voice_channels[vc.id]['remaining'] > 0:
+                if active_voice_channels[vc.id]['remaining'] == 60:
+                    await text_channel.send("⏰ 剩餘 1 分鐘。")
+
+                await asyncio.sleep(1)
+                active_voice_channels[vc.id]['remaining'] -= 1
+
+            await vc.delete()
+            await text_channel.send("📝 請點擊以下按鈕進行匿名評分。")
+
+            class SubmitButton(View):
+                def __init__(self):
+                    super().__init__(timeout=300)
+                    self.clicked = False
+
+                @discord.ui.button(label="匿名評分", style=discord.ButtonStyle.success)
+                async def submit(self, interaction: discord.Interaction, button: Button):
+                    if self.clicked:
+                        await interaction.response.send_message("❗ 已提交過評價。", ephemeral=True)
+                        return
+                    self.clicked = True
+                    await interaction.response.send_modal(RatingModal(record.id))
+
+            await text_channel.send(view=SubmitButton())
+            await asyncio.sleep(300)
+            await text_channel.delete()
+
+            record.extended_times = active_voice_channels[vc.id]['extended']
+            record.duration += record.extended_times * 600
+            session.commit()
+
+            admin = bot.get_channel(ADMIN_CHANNEL_ID)
+            if admin:
+                await admin.send(
+                    f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次"
+                )
+
+            active_voice_channels.pop(vc.id, None)
+        except Exception as e:
+            print(f"❌ Flask 排程錯誤: {e}")
+
+    bot.loop.create_task(schedule_vc())
+    return jsonify({"status": "ok"})
 
 threading.Thread(target=run_flask, daemon=True).start()
 
