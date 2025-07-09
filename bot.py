@@ -145,31 +145,39 @@ async def on_message(message):
     # 讓其他指令繼續被處理
     await bot.process_commands(message)
 
-# 台灣時區設定
+# 台灣時區設定now = datetime.now(TW_TZ)  # 使用台灣時間
 TW_TZ = timezone(timedelta(hours=8))
 
 @bot.tree.command(name="createvc", description="建立匿名語音頻道（指定開始時間）", guild=discord.Object(id=GUILD_ID))
-@app_commands.describe(members="標註的成員們", minutes="存在時間（分鐘）", start_time="幾點幾分後啟動 (格式: HH:MM, 24hr)", limit="人數上限")
-async def createvc(interaction: discord.Interaction, members: str, minutes: int, start_time: str, limit: int = 2):
+@app_commands.describe(
+    partner="標註一位要配對的夥伴",
+    minutes="存在時間（分鐘）",
+    start_time="幾點幾分後啟動 (格式: HH:MM, 24hr)",
+    limit="人數上限"
+)
+async def createvc(interaction: discord.Interaction, partner: discord.Member, minutes: int, start_time: str, limit: int = 2):
     await interaction.response.defer()
+
     try:
-        hour, minute = map(int, start_time.split(":"))
         now = datetime.now(TW_TZ)  # 使用台灣時間
+        hour, minute = map(int, start_time.split(":"))
+        now = datetime.now(TW_TZ)
         start_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if start_dt < now:
             start_dt += timedelta(days=1)
-        start_dt_utc = start_dt.astimezone(timezone.utc)  # 轉換成 UTC 時區
+        start_dt_utc = start_dt.astimezone(timezone.utc)
     except:
         await interaction.followup.send("❗ 時間格式錯誤，請使用 HH:MM 24 小時制。")
         return
 
+    # 封鎖檢查
     with Session() as s:
-        blocked_ids = [b.blocked_id for b in s.query(BlockRecord).filter(BlockRecord.blocker_id == str(interaction.user.id)).all()]
-    mentioned = [m for m in interaction.guild.members if f"<@{m.id}>" in members and str(m.id) not in blocked_ids]
-    if not mentioned:
-        await interaction.followup.send("❗請標註至少一位成員。")
-        return
+        is_blocked = s.query(BlockRecord).filter_by(blocker_id=str(interaction.user.id), blocked_id=str(partner.id)).first()
+        if is_blocked:
+            await interaction.followup.send("❗ 你已封鎖該用戶，無法配對。")
+            return
 
+    # 隨機動物暱稱
     animal = random.choice(ANIMALS)
     animal_channel_name = f"{animal}頻道"
 
@@ -181,9 +189,8 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, connect=True),
+            partner: discord.PermissionOverwrite(view_channel=True, connect=True),
         }
-        for m in mentioned:
-            overwrites[m] = discord.PermissionOverwrite(view_channel=True, connect=True)
 
         category = discord.utils.get(interaction.guild.categories, name="語音頻道")
         vc = await interaction.guild.create_voice_channel(name=animal_channel_name, overwrites=overwrites, user_limit=limit, category=category)
@@ -191,7 +198,7 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
 
         record = PairingRecord(
             user1_id=str(interaction.user.id),
-            user2_id=str(mentioned[0].id),
+            user2_id=str(partner.id),
             duration=minutes * 60,
             animal_name=animal
         )
@@ -209,18 +216,18 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
         view = ExtendView(vc.id)
         await text_channel.send(f"🎉 語音頻道 `{animal_channel_name}` 已開啟！\n⏳ 可延長。", view=view)
 
-        for user in [interaction.user] + mentioned:
+        # 自動移動進頻道
+        for user in [interaction.user, partner]:
             if user.voice and user.voice.channel:
                 await user.move_to(vc)
 
         try:
             while active_voice_channels[vc.id]['remaining'] > 0:
-                # 發出剩餘 60 秒提醒
                 if active_voice_channels[vc.id]['remaining'] == 60:
                     await text_channel.send("⏰ 剩餘 1 分鐘。")
-
                 await asyncio.sleep(1)
                 active_voice_channels[vc.id]['remaining'] -= 1
+
             await vc.delete()
             await text_channel.send("📝 請點擊以下按鈕進行匿名評分。")
 
@@ -245,11 +252,8 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
             record.duration += record.extended_times * 600
             session.commit()
 
-            #admin = bot.get_channel(ADMIN_CHANNEL_ID)
-            #if admin:
-                #await admin.send(f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次")
-
             active_voice_channels.pop(vc.id, None)
+
         except Exception as e:
             print(f"❌ 倒數錯誤: {e}")
 
