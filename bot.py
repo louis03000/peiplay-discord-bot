@@ -147,7 +147,7 @@ def move_user():
 def create_vc():
     data = request.get_json()
     customer_id = int(data["customer_id"])
-    partner_id = int(data["partner_id"])
+    partner_ids = data["partner_ids"]  # ⬅️ 改為 list
     start_time = datetime.fromisoformat(data["start_time"])
     duration = int(data["duration"])
 
@@ -155,24 +155,27 @@ def create_vc():
         await asyncio.sleep((start_time - datetime.utcnow()).total_seconds())
         guild = bot.get_guild(GUILD_ID)
         customer = guild.get_member(customer_id)
-        partner = guild.get_member(partner_id)
+        partners = [guild.get_member(int(pid)) for pid in partner_ids]
 
         animal = random.choice(ANIMALS)
         animal_channel_name = f"{animal}頻道"
 
+        # 設定頻道權限
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             customer: discord.PermissionOverwrite(view_channel=True, connect=True),
-            partner: discord.PermissionOverwrite(view_channel=True, connect=True),
         }
+        for partner in partners:
+            overwrites[partner] = discord.PermissionOverwrite(view_channel=True, connect=True)
 
         category = discord.utils.get(guild.categories, name="語音頻道")
-        vc = await guild.create_voice_channel(name=animal_channel_name, overwrites=overwrites, user_limit=2, category=category)
+        vc = await guild.create_voice_channel(name=animal_channel_name, overwrites=overwrites, user_limit=1 + len(partners), category=category)
         text_channel = await guild.create_text_channel(name="🔒匿名文字區", overwrites=overwrites, category=category)
 
+        # 建立配對紀錄
         record = PairingRecord(
             user1_id=str(customer.id),
-            user2_id=str(partner.id),
+            user2_id=",".join([str(p.id) for p in partners]),
             duration=duration,
             animal_name=animal
         )
@@ -190,10 +193,12 @@ def create_vc():
         view = ExtendView(vc.id)
         await text_channel.send(f"🎉 語音頻道 `{animal_channel_name}` 已開啟！\n⏳ 可延長。", view=view)
 
+        # 移動顧客與夥伴
         if customer.voice and customer.voice.channel:
             await customer.move_to(vc)
-        if partner.voice and partner.voice.channel:
-            await partner.move_to(vc)
+        for partner in partners:
+            if partner.voice and partner.voice.channel:
+                await partner.move_to(vc)
 
         try:
             while active_voice_channels[vc.id]['remaining'] > 0:
@@ -227,10 +232,12 @@ def create_vc():
             record.duration += record.extended_times * 600
             session.commit()
 
+            # 匯報給管理區
             admin = bot.get_channel(ADMIN_CHANNEL_ID)
             if admin:
+                partner_mentions = " × ".join([f"<@{p.id}>" for p in partners])
                 await admin.send(
-                    f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次"
+                    f"📋 配對紀錄：<@{record.user1_id}> × {partner_mentions} | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次"
                 )
 
             active_voice_channels.pop(vc.id, None)
@@ -239,7 +246,6 @@ def create_vc():
 
     bot.loop.create_task(schedule_vc())
     return jsonify({"status": "ok"})
-
 def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
