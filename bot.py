@@ -269,16 +269,17 @@ async def on_message(message):
         await message.channel.send("Pong!")
     await bot.process_commands(message)
 
-@bot.tree.command(name="createvc", description="建立匿名語音頻道（指定開始時間）", guild=discord.Object(id=GUILD_ID))
+@bot.tree.command(name="createvc", description="建立匿名語音頻道（多人配對）", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(
-    partner="標註一位要配對的夥伴",
+    partners="標註一位或多位要配對的夥伴（用空格隔開標註）",
     minutes="存在時間（分鐘）",
     start_time="幾點幾分後啟動 (格式: HH:MM, 24hr)",
-    limit="人數上限"
+    limit="人數上限（含自己）"
 )
-async def createvc(interaction: discord.Interaction, partner: discord.Member, minutes: int, start_time: str, limit: int = 2):
+async def createvc(interaction: discord.Interaction, partners: str, minutes: int, start_time: str, limit: int = 2):
     await interaction.response.defer()
 
+    # 時間處理
     try:
         now = datetime.now(TW_TZ)
         hour, minute = map(int, start_time.split(":"))
@@ -290,12 +291,19 @@ async def createvc(interaction: discord.Interaction, partner: discord.Member, mi
         await interaction.followup.send("❗ 時間格式錯誤，請使用 HH:MM 24 小時制。")
         return
 
-    # 封鎖檢查（使用 SessionLocal 避免冲突）
+    # 抓出 partner id
+    partner_ids = [int(word.strip("<@!>")) for word in partners.split() if word.startswith("<@")]
+    partner_members = [interaction.guild.get_member(pid) for pid in partner_ids]
+    if not partner_members:
+        await interaction.followup.send("❗ 請標註至少一位夥伴。")
+        return
+
+    # 檢查封鎖
     with SessionLocal() as s:
-        is_blocked = s.query(BlockRecord).filter_by(blocker_id=str(interaction.user.id), blocked_id=str(partner.id)).first()
-        if is_blocked:
-            await interaction.followup.send("❗ 你已封鎖該用戶，無法配對。")
-            return
+        for partner in partner_members:
+            if s.query(BlockRecord).filter_by(blocker_id=str(interaction.user.id), blocked_id=str(partner.id)).first():
+                await interaction.followup.send(f"❗ 你已封鎖 <@{partner.id}>，無法配對。")
+                return
 
     animal = random.choice(ANIMALS)
     animal_channel_name = f"{animal}頻道"
@@ -307,17 +315,23 @@ async def createvc(interaction: discord.Interaction, partner: discord.Member, mi
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, connect=True),
-            partner: discord.PermissionOverwrite(view_channel=True, connect=True),
         }
+        for partner in partner_members:
+            overwrites[partner] = discord.PermissionOverwrite(view_channel=True, connect=True)
 
         category = discord.utils.get(interaction.guild.categories, name="語音頻道")
         vc = await interaction.guild.create_voice_channel(name=animal_channel_name, overwrites=overwrites, user_limit=limit, category=category)
         text_channel = await interaction.guild.create_text_channel(name="🔒匿名文字區", overwrites=overwrites, category=category)
+        #移動所有人進語音頻道
+        all_members = [interaction.user] + partner_members
+        for user in all_members:
+            if user.voice and user.voice.channel:
+                await user.move_to(vc)
 
         # 使用 db_session 而非全局 Session
         record = PairingRecord(
             user1_id=str(interaction.user.id),
-            user2_id=str(partner.id),
+            user2_id=",".join(str(p.id) for p in partner_members),
             duration=minutes * 60,
             animal_name=animal,
             channel_id=str(vc.id),
