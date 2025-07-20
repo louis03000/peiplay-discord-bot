@@ -243,7 +243,7 @@ def create_vc():
             f"📋 配對紀錄：<@{customer.id}> × {partner_mentions} | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次"
         )
 
-    asyncio.create_task(schedule_vc())
+    asyncio.run_coroutine_threadsafe(schedule_vc(), bot.loop)
     return jsonify({"status": "scheduled"})
 
 # 补充 Flask 启动函数（之前遗漏，会导致报错）
@@ -308,7 +308,13 @@ async def createvc(interaction: discord.Interaction, partners: str, minutes: int
     animal = random.choice(ANIMALS)
     animal_channel_name = f"{animal}頻道"
     await interaction.followup.send(f"✅ 已排程配對頻道：`{animal_channel_name}` 將於 <t:{int(start_dt_utc.timestamp())}:t> 開啟")
+    
+    guild = interaction.guild                     # ✅ 取得 guild
+    all_users = [interaction.user] + partner_members  # ✅ 把 initiator 和 partners 合成一個 list
+    animal_name = animal                          # ✅ 已在上方 random.choice(ANIMALS)
 
+    asyncio.create_task(countdown(guild, all_users, minutes, start_time, animal_name))
+    
     async def countdown():
         await asyncio.sleep((start_dt_utc - datetime.now(timezone.utc)).total_seconds())
 
@@ -353,7 +359,7 @@ async def createvc(interaction: discord.Interaction, partners: str, minutes: int
         await text_channel.send(f"🎉 語音頻道 `{animal_channel_name}` 已開啟！\n⏳ 可延長。", view=view)
         
         # 自動移動進頻道
-        for user in [interaction.user, partner]:
+        for user in [interaction.user] + partner_members:
             if user.voice and user.voice.channel:
                 await user.move_to(vc)
 
@@ -375,7 +381,7 @@ async def createvc(interaction: discord.Interaction, partners: str, minutes: int
                 @discord.ui.button(label="匿名評分", style=discord.ButtonStyle.success)
                 async def submit(self, interaction: discord.Interaction, button: Button):
                     if self.clicked:
-                        await interaction.response.send_message("❗ 已提交過評價。", ephemeral=True)
+                        await interaction.response.send_message("❗ 已提交過評價。", ephemeral=True)                        
                         return
                     self.clicked = True
                     await interaction.response.send_modal(RatingModal(record.id))
