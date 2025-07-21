@@ -130,7 +130,7 @@ async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, m
                 await user.move_to(vc)
 
         view = ExtendView(vc.id)
-        await text_channel.send(f"🎉 語音頻道 {animal_channel_name} 已開啟！\n⏳ 可延長10分鐘(為了您有更好的遊戲體驗，請到最後需要時再點選)。", view=view)
+        await text_channel.send(f"🎉 語音頻道 {animal_channel_name} 已開啟！\n⏳ 可延長10分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。", view=view)
 
         while active_voice_channels[vc_id]['remaining'] > 0:
             remaining = active_voice_channels[vc_id]['remaining']
@@ -165,7 +165,12 @@ async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, m
 
         admin = bot.get_channel(ADMIN_CHANNEL_ID)
         if admin:
-            await admin.send(f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次")
+            msg = f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次"
+            if record.id in pending_ratings:
+                for r in pending_ratings[record.id]:
+                    msg += f"\n⭐ 評分：{r['rating']}\n💬 留言：{r['comment']}"
+                del pending_ratings[record.id]
+            await admin.send(msg)
 
         active_voice_channels.pop(vc_id, None)
     except Exception as e:
