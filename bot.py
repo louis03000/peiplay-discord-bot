@@ -36,6 +36,12 @@ class PairingRecord(Base):
     comment = Column(String, nullable=True)
     animal_name = Column(String)
 
+class BlockRecord(Base):
+    __tablename__ = 'block_records'
+    id = Column(Integer, primary_key=True)
+    blocker_id = Column(String)
+    blocked_id = Column(String)
+
 Base.metadata.create_all(engine)
 
 intents = discord.Intents.default()
@@ -49,15 +55,7 @@ active_voice_channels = {}
 evaluated_records = set()
 
 ANIMALS = ["🦊 狐狸", "🐱 貓咪", "🐶 小狗", "🐻 熊熊", "🐼 貓熊", "🐯 老虎", "🦁 獅子", "🐸 青蛙", "🐵 猴子"]
-
-# 封鎖名單
-class BlockRecord(Base):
-    __tablename__ = 'block_records'
-    id = Column(Integer, primary_key=True)
-    blocker_id = Column(String)
-    blocked_id = Column(String)
-
-Base.metadata.create_all(engine)
+TW_TZ = timezone(timedelta(hours=8))
 
 # --- 評分 Modal ---
 class RatingModal(Modal, title="匿名評分與留言"):
@@ -110,34 +108,75 @@ async def on_ready():
     except Exception as e:
         print(f"❌ 指令同步失敗: {e}")
 
-# --- 建立頻道指令 ---
 @bot.event
 async def on_message(message):
-    # 忽略自己發的訊息，避免無限迴圈
     if message.author == bot.user:
         return
-
-    # 如果有人在 Discord 輸入 "!ping"，Bot 回傳 "Pong!"
     if message.content == "!ping":
         await message.channel.send("Pong!")
-
-    # 讓其他指令繼續被處理
     await bot.process_commands(message)
 
-# 台灣時區設定
-TW_TZ = timezone(timedelta(hours=8))
+# --- 倒數邏輯 ---
+async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, mentioned, record):
+    try:
+        for user in [interaction.user] + mentioned:
+            if user.voice and user.voice.channel:
+                await user.move_to(vc)
 
+        view = ExtendView(vc.id)
+        await text_channel.send(f"🎉 語音頻道 {animal_channel_name} 已開啟！\n⏳ 可延長。", view=view)
+
+        while active_voice_channels[vc_id]['remaining'] > 0:
+            remaining = active_voice_channels[vc_id]['remaining']
+            if remaining == 60:
+                await text_channel.send("⏰ 剩餘 1 分鐘。")
+            await asyncio.sleep(1)
+            active_voice_channels[vc_id]['remaining'] -= 1
+
+        await vc.delete()
+        await text_channel.send("📝 請點擊以下按鈕進行匿名評分。")
+
+        class SubmitButton(View):
+            def __init__(self):
+                super().__init__(timeout=300)
+                self.clicked = False
+
+            @discord.ui.button(label="匿名評分", style=discord.ButtonStyle.success)
+            async def submit(self, interaction: discord.Interaction, button: Button):
+                if self.clicked:
+                    await interaction.response.send_message("❗ 已提交過評價。", ephemeral=True)
+                    return
+                self.clicked = True
+                await interaction.response.send_modal(RatingModal(record.id))
+
+        await text_channel.send(view=SubmitButton())
+        await asyncio.sleep(300)
+        await text_channel.delete()
+
+        record.extended_times = active_voice_channels[vc_id]['extended']
+        record.duration += record.extended_times * 600
+        session.commit()
+
+        admin = bot.get_channel(ADMIN_CHANNEL_ID)
+        if admin:
+            await admin.send(f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次")
+
+        active_voice_channels.pop(vc_id, None)
+    except Exception as e:
+        print(f"❌ 倒數錯誤: {e}")
+
+# --- 指令：/createvc ---
 @bot.tree.command(name="createvc", description="建立匿名語音頻道（指定開始時間）", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(members="標註的成員們", minutes="存在時間（分鐘）", start_time="幾點幾分後啟動 (格式: HH:MM, 24hr)", limit="人數上限")
 async def createvc(interaction: discord.Interaction, members: str, minutes: int, start_time: str, limit: int = 2):
     await interaction.response.defer()
     try:
         hour, minute = map(int, start_time.split(":"))
-        now = datetime.now(TW_TZ)  # 使用台灣時間
+        now = datetime.now(TW_TZ)
         start_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if start_dt < now:
             start_dt += timedelta(days=1)
-        start_dt_utc = start_dt.astimezone(timezone.utc)  # 轉換成 UTC 時區
+        start_dt_utc = start_dt.astimezone(timezone.utc)
     except:
         await interaction.followup.send("❗ 時間格式錯誤，請使用 HH:MM 24 小時制。")
         return
@@ -151,10 +190,9 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
 
     animal = random.choice(ANIMALS)
     animal_channel_name = f"{animal}頻道"
-
     await interaction.followup.send(f"✅ 已排程配對頻道：{animal_channel_name} 將於 <t:{int(start_dt_utc.timestamp())}:t> 開啟")
 
-    async def countdown():
+    async def countdown_wrapper():
         await asyncio.sleep((start_dt_utc - datetime.now(timezone.utc)).total_seconds())
 
         overwrites = {
@@ -185,55 +223,11 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
             'vc': vc
         }
 
-        view = ExtendView(vc.id)
-        await text_channel.send(f"🎉 語音頻道 {animal_channel_name} 已開啟！\n⏳ 可延長。", view=view)
+        await countdown(vc.id, animal_channel_name, text_channel, vc, interaction, mentioned, record)
 
-        for user in [interaction.user] + mentioned:
-            if user.voice and user.voice.channel:
-                await user.move_to(vc)
+    bot.loop.create_task(countdown_wrapper())
 
-        try:
-            while active_voice_channels[vc.id]['remaining'] > 60:
-                await asyncio.sleep(60)
-                active_voice_channels[vc.id]['remaining'] -= 60
-
-            await text_channel.send("⏰ 剩餘 1 分鐘。")
-            await asyncio.sleep(60)
-            await vc.delete()
-            await text_channel.send("📝 請點擊以下按鈕進行匿名評分。")
-
-            class SubmitButton(View):
-                def __init__(self):
-                    super().__init__(timeout=300)
-                    self.clicked = False
-
-                @discord.ui.button(label="匿名評分", style=discord.ButtonStyle.success)
-                async def submit(self, interaction: discord.Interaction, button: Button):
-                    if self.clicked:
-                        await interaction.response.send_message("❗ 已提交過評價。", ephemeral=True)
-                        return
-                    self.clicked = True
-                    await interaction.response.send_modal(RatingModal(record.id))
-
-            await text_channel.send(view=SubmitButton())
-            await asyncio.sleep(300)
-            await text_channel.delete()
-
-            record.extended_times = active_voice_channels[vc.id]['extended']
-            record.duration += record.extended_times * 600
-            session.commit()
-
-            admin = bot.get_channel(ADMIN_CHANNEL_ID)
-            if admin:
-                await admin.send(f"📋 配對紀錄：<@{record.user1_id}> × <@{record.user2_id}> | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次")
-
-            active_voice_channels.pop(vc.id, None)
-        except Exception as e:
-            print(f"❌ 倒數錯誤: {e}")
-
-    bot.loop.create_task(countdown())
-
-# 封鎖動作
+# --- 其他 Slash 指令 ---
 @bot.tree.command(name="viewblocklist", description="查看你封鎖的使用者", guild=discord.Object(id=GUILD_ID))
 async def view_blocklist(interaction: discord.Interaction):
     with Session() as s:
@@ -241,11 +235,9 @@ async def view_blocklist(interaction: discord.Interaction):
         if not blocks:
             await interaction.response.send_message("📭 你尚未封鎖任何人。", ephemeral=True)
             return
-
         blocked_mentions = [f"<@{b.blocked_id}>" for b in blocks]
         await interaction.response.send_message(f"🔒 你封鎖的使用者：\n" + "\n".join(blocked_mentions), ephemeral=True)
 
-# 解除封鎖
 @bot.tree.command(name="unblock", description="解除你封鎖的某人", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="要解除封鎖的使用者")
 async def unblock(interaction: discord.Interaction, member: discord.Member):
@@ -258,7 +250,6 @@ async def unblock(interaction: discord.Interaction, member: discord.Member):
         else:
             await interaction.response.send_message("❗ 你沒有封鎖這位使用者。", ephemeral=True)
 
-# --- /report 舉報功能 ---
 @bot.tree.command(name="report", description="舉報不當行為", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="被舉報的使用者", reason="舉報原因")
 async def report(interaction: discord.Interaction, member: discord.Member, reason: str):
@@ -267,7 +258,6 @@ async def report(interaction: discord.Interaction, member: discord.Member, reaso
     if admin:
         await admin.send(f"🚨 舉報通知：<@{interaction.user.id}> 舉報 <@{member.id}>\n📄 理由：{reason}")
 
-# --- /mystats 查詢自己 ---
 @bot.tree.command(name="mystats", description="查詢自己的配對統計", guild=discord.Object(id=GUILD_ID))
 async def mystats(interaction: discord.Interaction):
     records = session.query(PairingRecord).filter((PairingRecord.user1_id==str(interaction.user.id)) | (PairingRecord.user2_id==str(interaction.user.id))).all()
@@ -275,11 +265,8 @@ async def mystats(interaction: discord.Interaction):
     ratings = [r.rating for r in records if r.rating]
     comments = [r.comment for r in records if r.comment]
     avg_rating = round(sum(ratings)/len(ratings), 1) if ratings else "無"
-    await interaction.response.send_message(
-        f"📊 你的配對紀錄：\n- 配對次數：{count} 次\n- 平均評分：{avg_rating} ⭐\n- 收到留言：{len(comments)} 則",
-        ephemeral=True)
+    await interaction.response.send_message(f"📊 你的配對紀錄：\n- 配對次數：{count} 次\n- 平均評分：{avg_rating} ⭐\n- 收到留言：{len(comments)} 則", ephemeral=True)
 
-# --- /stats @user 管理員查詢 ---
 @bot.tree.command(name="stats", description="查詢他人配對統計 (限管理員)", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(member="要查詢的使用者")
 async def stats(interaction: discord.Interaction, member: discord.Member):
@@ -291,9 +278,7 @@ async def stats(interaction: discord.Interaction, member: discord.Member):
     ratings = [r.rating for r in records if r.rating]
     comments = [r.comment for r in records if r.comment]
     avg_rating = round(sum(ratings)/len(ratings), 1) if ratings else "無"
-    await interaction.response.send_message(
-        f"📊 <@{member.id}> 的配對紀錄：\n- 配對次數：{count} 次\n- 平均評分：{avg_rating} ⭐\n- 收到留言：{len(comments)} 則",
-        ephemeral=True)
+    await interaction.response.send_message(f"📊 <@{member.id}> 的配對紀錄：\n- 配對次數：{count} 次\n- 平均評分：{avg_rating} ⭐\n- 收到留言：{len(comments)} 則", ephemeral=True)
 
 # --- Flask API ---
 app = Flask(__name__)
@@ -314,10 +299,8 @@ def move_user():
     bot.loop.create_task(mover())
     return jsonify({"status": "ok"})
 
-# --- 啟動 Flask 在子執行緒 ---
 def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
 threading.Thread(target=run_flask, daemon=True).start()
-
 bot.run(TOKEN)
