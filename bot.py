@@ -53,6 +53,7 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 active_voice_channels = {}
 evaluated_records = set()
+pending_ratings = {}
 
 ANIMALS = ["🦊 狐狸", "🐱 貓咪", "🐶 小狗", "🐻 熊熊", "🐼 貓熊", "🐯 老虎", "🦁 獅子", "🐸 青蛙", "🐵 猴子"]
 TW_TZ = timezone(timedelta(hours=8))
@@ -74,9 +75,14 @@ class RatingModal(Modal, title="匿名評分與留言"):
             session.commit()
             await interaction.response.send_message("✅ 感謝你的匿名評價！", ephemeral=True)
 
-            admin = bot.get_channel(ADMIN_CHANNEL_ID)
-            if admin:
-                await admin.send(f"⭐ 評分：{record.rating} 星\n💬 留言：{record.comment or '（無留言）'}\n👤 配對：<@{record.user1_id}> × <@{record.user2_id}>")
+            if self.record_id not in pending_ratings:
+                pending_ratings[self.record_id] = []
+            pending_ratings[self.record_id].append({
+                'rating': record.rating,
+                'comment': record.comment,
+                'user1': record.user1_id,
+                'user2': record.user2_id
+            })
 
             evaluated_records.add(self.record_id)
         except Exception as e:
@@ -124,7 +130,7 @@ async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, m
                 await user.move_to(vc)
 
         view = ExtendView(vc.id)
-        await text_channel.send(f"🎉 語音頻道 {animal_channel_name} 已開啟！\n⏳ 可延長。", view=view)
+        await text_channel.send(f"🎉 語音頻道 {animal_channel_name} 已開啟！\n⏳ 可延長10分鐘(為了您有更好的遊戲體驗，請到最後需要時再點選)。", view=view)
 
         while active_voice_channels[vc_id]['remaining'] > 0:
             remaining = active_voice_channels[vc_id]['remaining']
