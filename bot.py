@@ -80,8 +80,8 @@ class RatingModal(Modal, title="匿名評分與留言"):
             pending_ratings[self.record_id].append({
                 'rating': record.rating,
                 'comment': record.comment,
-                'user1': record.user1_id,
-                'user2': record.user2_id
+                'user1': str(interaction.user.id),
+                'user2': str(record.user2_id if str(interaction.user.id) == record.user1_id else record.user1_id)
             })
 
             evaluated_records.add(self.record_id)
