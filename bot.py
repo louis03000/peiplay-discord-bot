@@ -113,7 +113,7 @@ async def setup_pairing_channel(
         partner_member: discord.PermissionOverwrite(view_channel=True, connect=True),
     }
     category = discord.utils.get(guild.categories, name="語音頻道")
-    channel_name = f"{animal}頻道-{customer_member.display_name[:6]}-{partner_member.display_name[:6]}"
+    channel_name = f"匿名配對-{customer_member.name[:6]}-{partner_member.name[:6]}"
     vc = await guild.create_voice_channel(name=channel_name, overwrites=overwrites, category=category)
 
     # 建立匿名文字區
@@ -131,11 +131,11 @@ async def setup_pairing_channel(
     }
 
     # 頻道剛開啟時的提示訊息
-    view = ExtendView(vc.id)
-    await text_channel.send(
-        f"🎉 語音頻道 {channel_name} 已開啟！\n⏳ 可延長10分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。",
-        view=view
-    )
+    #view = ExtendView(vc.id)
+    #await text_channel.send(
+        #f"🎉 語音頻道 {channel_name} 已開啟！\n⏳ 可延長10分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。",
+        #view=view
+    #)
 
     # 啟動倒數
     bot.loop.create_task(
@@ -309,14 +309,14 @@ async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, m
             try:
                 u1 = await bot.fetch_user(int(record.user1_id))
                 u2 = await bot.fetch_user(int(record.user2_id))
-                header = f"📋 配對紀錄：{u1.mention} × {u2.mention} | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次"
+                header = f"📋 配對紀錄：{u1.name} × {u2.name} | {record.duration//60} 分鐘 | 延長 {record.extended_times} 次"
 
                 if record.id in pending_ratings:
                     feedback = "\n⭐ 評價回饋："
                     for r in pending_ratings[record.id]:
                         from_user = await bot.fetch_user(int(r['user1']))
                         to_user = await bot.fetch_user(int(r['user2']))
-                        feedback += f"\n- 「{from_user.mention} → {to_user.mention}」：{r['rating']} ⭐"
+                        feedback += f"\n- 「{from_user.name} → {to_user.name}」：{r['rating']} ⭐"
                         if r['comment']:
                             feedback += f"\n  💬 {r['comment']}"
                     del pending_ratings[record.id]
