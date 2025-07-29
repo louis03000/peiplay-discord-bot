@@ -1,4 +1,4 @@
-import os 
+import os
 import asyncio
 import random
 import discord
@@ -94,6 +94,21 @@ opened_channels = set()
 ANIMALS = ["🦊 狐狸", "🐱 貓咪", "🐶 小狗", "🐻 熊熊", "🐼 貓熊", "🐯 老虎", "🦁 獅子", "🐸 青蛙", "🐵 猴子"]
 TW_TZ = timezone(timedelta(hours=8))
 
+# --- 成員搜尋函數 ---
+def find_member_by_name(guild, name):
+    """不區分大小寫搜尋成員"""
+    name_lower = name.lower()
+    print(f"搜尋名稱: {name} (轉小寫: {name_lower})")
+    
+    for member in guild.members:
+        print(f"檢查成員: {member.name} (小寫: {member.name.lower()})")
+        if member.name.lower() == name_lower:
+            print(f"找到匹配: {member.name}")
+            return member
+    
+    print(f"未找到匹配的成員: {name}")
+    return None
+
 #自動開設頻道
 async def setup_pairing_channel(
     guild, 
@@ -176,8 +191,9 @@ async def check_and_create_channels():
             print(f"找不到 Discord 名稱: {booking.id}")
             continue
 
-        customer_member = discord.utils.get(guild.members, name=customer_discord)
-        partner_member = discord.utils.get(guild.members, name=partner_discord)
+        # 使用新的搜尋函數
+        customer_member = find_member_by_name(guild, customer_discord)
+        partner_member = find_member_by_name(guild, partner_discord)
 
         if not customer_member or not partner_member:
             print(f"找不到 Discord 成員: {customer_discord}, {partner_discord}")
@@ -252,6 +268,10 @@ async def on_ready():
         guild = discord.Object(id=GUILD_ID)
         synced = await bot.tree.sync(guild=guild)
         print(f"✅ Slash 指令已同步：{len(synced)} 個指令")
+        
+        # 啟動自動查詢任務
+        check_and_create_channels.start()
+        print(f"✅ 自動查詢任務已啟動，檢查間隔：{CHECK_INTERVAL} 秒")
     except Exception as e:
         print(f"❌ 指令同步失敗: {e}")
 
@@ -346,11 +366,21 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
         await interaction.followup.send("❗ 時間格式錯誤，請使用 HH:MM 24 小時制。")
         return
 
-    with Session() as s:
-        blocked_ids = [b.blocked_id for b in s.query(BlockRecord).filter(BlockRecord.blocker_id == str(interaction.user.id)).all()]
-    mentioned = [m for m in interaction.guild.members if f"<@{m.id}>" in members and str(m.id) not in blocked_ids]
+    # 解析成員名稱（假設格式是 "name1,name2" 或 "name1 name2"）
+    member_names = [name.strip() for name in members.replace(',', ' ').split() if name.strip()]
+
+    # 使用新的搜尋函數
+    mentioned = []
+    for name in member_names:
+        member = find_member_by_name(interaction.guild, name)
+        if member:
+            mentioned.append(member)
+        else:
+            await interaction.followup.send(f"❗ 找不到成員：{name}")
+            return
+
     if not mentioned:
-        await interaction.followup.send("❗請標註至少一位成員。")
+        await interaction.followup.send("❗ 請提供至少一位有效的成員名稱。")
         return
 
     animal = random.choice(ANIMALS)
@@ -451,4 +481,4 @@ def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
 threading.Thread(target=run_flask, daemon=True).start()
-bot.run(TOKEN)
+bot.run(TOKEN) 
