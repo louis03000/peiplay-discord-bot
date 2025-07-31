@@ -283,6 +283,39 @@ async def on_message(message):
     if message.content == "!ping":
         await message.channel.send("Pong!")
     await bot.process_commands(message)
+    
+async def create_scheduled_channel(bot, sched):
+    guild = bot.get_guild(GUILD_ID)
+    member = guild.get_member(int(sched.user_id))
+
+    if not member:
+        print(f"❗ 找不到使用者：{sched.user_id}")
+        return
+
+    duration_minutes = sched.duration or 30
+    animal = sched.channel_name or "🐻 熊熊"
+
+    # 建立配對紀錄
+    record = PairingRecord(
+        user1_id=str(member.id),
+        user2_id=None,  # 排程預設只有一人
+        duration=duration_minutes * 60,
+        animal_name=animal
+    )
+    session.add(record)
+    session.commit()
+
+    # 建立頻道（此函式已有匿名頻道等邏輯）
+    await setup_pairing_channel(
+        guild=guild,
+        user1=member,
+        user2=member,
+        duration_minutes=duration_minutes,
+        animal=animal,
+        record=record,
+        interaction=None,
+        mentioned=[member]
+    )
 
 # --- 倒數邏輯 ---
 async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, mentioned, record):
@@ -475,4 +508,31 @@ def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
 threading.Thread(target=run_flask, daemon=True).start()
+
+@tasks.loop(seconds=30)
+async def schedule_checker():
+    print("🔁 檢查排程中...")
+    session = Session()
+    now = datetime.now(TW_TZ)
+    due_schedules = session.query(Schedule).filter(Schedule.scheduled_time <= now).all()
+    for sched in due_schedules:
+        print(f"⏰ 建立排程頻道：{sched.channel_name}")
+        await create_scheduled_channel(bot, sched)
+        session.delete(sched)
+    session.commit()
+    session.close()
+
+# === [2] 等待 bot 準備好後才開始檢查排程 ===
+@schedule_checker.before_loop
+async def before_schedule_checker():
+    await bot.wait_until_ready()
+
+# === [3] bot 啟動時同時啟用排程檢查 ===
+@bot.event
+async def on_ready():
+    print(f'Bot 已登入為 {bot.user}')
+    if not schedule_checker.is_running():
+        schedule_checker.start()
+        print("✅ 排程檢查啟動")
+
 bot.run(TOKEN) 
