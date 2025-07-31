@@ -128,7 +128,7 @@ async def setup_pairing_channel(
         partner_member: discord.PermissionOverwrite(view_channel=True, connect=True),
     }
     category = discord.utils.get(guild.categories, name="語音頻道")
-    channel_name = f"匿名配對-{customer_member.name[:6]}-{partner_member.name[:6]}"
+    channel_name = animal
     vc = await guild.create_voice_channel(name=channel_name, overwrites=overwrites, category=category)
 
     # 建立匿名文字區
@@ -401,7 +401,7 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
 
         # 用共用 function 建立頻道
         await setup_pairing_channel(
-            interaction.guild, interaction.user, mentioned[0], minutes, animal, record=record, interaction=interaction, mentioned=mentioned
+            interaction.guild, interaction.user, mentioned[0], minutes, animal_channel_name, record=record, interaction=interaction, mentioned=mentioned
         )
     bot.loop.create_task(countdown_wrapper())
 
