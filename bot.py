@@ -2,6 +2,7 @@ import os
 import asyncio
 import random
 import discord
+import typing
 from discord.ext import commands, tasks
 from discord import app_commands
 from discord.ui import View, Button, Modal, TextInput
@@ -370,14 +371,7 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
     member_names = [name.strip() for name in members.replace(',', ' ').split() if name.strip()]
 
     # 使用新的搜尋函數
-    mentioned = []
-    for name in member_names:
-        member = find_member_by_name(interaction.guild, name)
-        if member:
-            mentioned.append(member)
-        else:
-            await interaction.followup.send(f"❗ 找不到成員：{name}")
-            return
+    mentioned = members
 
     if not mentioned:
         await interaction.followup.send("❗ 請提供至少一位有效的成員名稱。")
