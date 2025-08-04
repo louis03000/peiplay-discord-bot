@@ -2,7 +2,6 @@ import os
 import asyncio
 import random
 import discord
-import typing
 from discord.ext import commands, tasks
 from discord import app_commands
 from discord.ui import View, Button, Modal, TextInput
@@ -129,7 +128,7 @@ async def setup_pairing_channel(
         partner_member: discord.PermissionOverwrite(view_channel=True, connect=True),
     }
     category = discord.utils.get(guild.categories, name="語音頻道")
-    channel_name = animal
+    channel_name = f"匿名配對-{customer_member.name[:6]}-{partner_member.name[:6]}"
     vc = await guild.create_voice_channel(name=channel_name, overwrites=overwrites, category=category)
 
     # 建立匿名文字區
@@ -146,17 +145,10 @@ async def setup_pairing_channel(
         'vc': vc
     }
 
-    # 頻道剛開啟時的提示訊息
-    #view = ExtendView(vc.id)
-    #await text_channel.send(
-        #f"🎉 語音頻道 {channel_name} 已開啟！\n⏳ 可延長10分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。",
-        #view=view
-    #)
-
-    # 啟動倒數
-    bot.loop.create_task(
-        countdown(vc.id, channel_name, text_channel, vc, interaction, mentioned or [customer_member, partner_member], record)
-    )
+            # 啟動倒數
+        bot.loop.create_task(
+            countdown(vc.id, animal, text_channel, vc, interaction, mentioned or [customer_member, partner_member], record)
+        )
 
     return vc, text_channel
 
@@ -283,49 +275,16 @@ async def on_message(message):
     if message.content == "!ping":
         await message.channel.send("Pong!")
     await bot.process_commands(message)
-    
-async def create_scheduled_channel(bot, sched):
-    guild = bot.get_guild(GUILD_ID)
-    member = guild.get_member(int(sched.user_id))
-
-    if not member:
-        print(f"❗ 找不到使用者：{sched.user_id}")
-        return
-
-    duration_minutes = sched.duration or 30
-    animal = sched.channel_name or "🐻 熊熊"
-
-    # 建立配對紀錄
-    record = PairingRecord(
-        user1_id=str(member.id),
-        user2_id=None,  # 排程預設只有一人
-        duration=duration_minutes * 60,
-        animal_name=animal
-    )
-    session.add(record)
-    session.commit()
-
-    # 建立頻道（此函式已有匿名頻道等邏輯）
-    await setup_pairing_channel(
-        guild=guild,
-        user1=member,
-        user2=member,
-        duration_minutes=duration_minutes,
-        animal=animal,
-        record=record,
-        interaction=None,
-        mentioned=[member]
-    )
 
 # --- 倒數邏輯 ---
-async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, mentioned, record):
+async def countdown(vc_id, animal, text_channel, vc, interaction, mentioned, record):
     try:
         for user in [interaction.user] + mentioned:
             if user.voice and user.voice.channel:
                 await user.move_to(vc)
 
         view = ExtendView(vc.id)
-        await text_channel.send(f"🎉 語音頻道 {animal_channel_name} 已開啟！\n⏳ 可延長10分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。", view=view)
+        await text_channel.send(f"🎉 語音頻道 {animal} 已開啟！\n⏳ 可延長10分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。", view=view)
 
         while active_voice_channels[vc_id]['remaining'] > 0:
             remaining = active_voice_channels[vc_id]['remaining']
@@ -388,49 +347,78 @@ async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, m
 @bot.tree.command(name="createvc", description="建立匿名語音頻道（指定開始時間）", guild=discord.Object(id=GUILD_ID))
 @app_commands.describe(members="標註的成員們", minutes="存在時間（分鐘）", start_time="幾點幾分後啟動 (格式: HH:MM, 24hr)", limit="人數上限")
 async def createvc(interaction: discord.Interaction, members: str, minutes: int, start_time: str, limit: int = 2):
-    await interaction.response.defer()
     try:
-        hour, minute = map(int, start_time.split(":"))
-        now = datetime.now(TW_TZ)
-        start_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if start_dt < now:
-            start_dt += timedelta(days=1)
-        start_dt_utc = start_dt.astimezone(timezone.utc)
-    except:
-        await interaction.followup.send("❗ 時間格式錯誤，請使用 HH:MM 24 小時制。")
-        return
+        # 先回應，避免超時
+        await interaction.response.defer()
+        
+        # 解析時間
+        try:
+            hour, minute = map(int, start_time.split(":"))
+            now = datetime.now(TW_TZ)
+            start_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if start_dt < now:
+                start_dt += timedelta(days=1)
+            start_dt_utc = start_dt.astimezone(timezone.utc)
+        except:
+            await interaction.followup.send("❗ 時間格式錯誤，請使用 HH:MM 24 小時制。")
+            return
 
-    # 解析成員名稱（假設格式是 "name1,name2" 或 "name1 name2"）
-    member_names = [name.strip() for name in members.replace(',', ' ').split() if name.strip()]
+        # 解析成員名稱
+        member_names = [name.strip() for name in members.replace(',', ' ').split() if name.strip()]
+        
+        if not member_names:
+            await interaction.followup.send("❗ 請提供至少一位有效的成員名稱。")
+            return
 
-    # 使用新的搜尋函數
-    mentioned = members
+        # 搜尋成員
+        guild = interaction.guild
+        found_members = []
+        for name in member_names:
+            member = find_member_by_name(guild, name)
+            if member:
+                found_members.append(member)
+            else:
+                await interaction.followup.send(f"❗ 找不到成員：{name}")
+                return
 
-    if not mentioned:
-        await interaction.followup.send("❗ 請提供至少一位有效的成員名稱。")
-        return
+        if len(found_members) < 2:
+            await interaction.followup.send("❗ 需要至少兩位成員才能建立配對頻道。")
+            return
 
-    animal = random.choice(ANIMALS)
-    animal_channel_name = f"{animal}頻道"
-    await interaction.followup.send(f"✅ 已排程配對頻道：{animal_channel_name} 將於 <t:{int(start_dt_utc.timestamp())}:t> 開啟")
+        animal = random.choice(ANIMALS)
+        animal_channel_name = f"{animal}頻道"
+        
+        await interaction.followup.send(f"✅ 已排程配對頻道：{animal_channel_name} 將於 <t:{int(start_dt_utc.timestamp())}:t> 開啟")
 
-    async def countdown_wrapper():
-        await asyncio.sleep((start_dt_utc - datetime.now(timezone.utc)).total_seconds())
+        async def countdown_wrapper():
+            await asyncio.sleep((start_dt_utc - datetime.now(timezone.utc)).total_seconds())
 
-        record = PairingRecord(
-            user1_id=str(interaction.user.id),
-            user2_id=str(mentioned[0].id),
-            duration=minutes * 60,
-            animal_name=animal
-        )
-        session.add(record)
-        session.commit()
+            record = PairingRecord(
+                user1_id=str(found_members[0].id),
+                user2_id=str(found_members[1].id),
+                duration=minutes * 60,
+                animal_name=animal
+            )
+            session.add(record)
+            session.commit()
 
-        # 用共用 function 建立頻道
-        await setup_pairing_channel(
-            interaction.guild, interaction.user, mentioned[0], minutes, animal_channel_name, record=record, interaction=interaction, mentioned=mentioned
-        )
-    bot.loop.create_task(countdown_wrapper())
+            # 用共用 function 建立頻道
+            await setup_pairing_channel(
+                interaction.guild, 
+                found_members[0], 
+                found_members[1], 
+                minutes, 
+                animal, 
+                record=record, 
+                interaction=interaction, 
+                mentioned=found_members
+            )
+        
+        bot.loop.create_task(countdown_wrapper())
+        
+    except Exception as e:
+        print(f"❌ /createvc 錯誤: {e}")
+        await interaction.followup.send(f"❌ 建立頻道時發生錯誤：{str(e)}")
 
 # --- 其他 Slash 指令 ---
 @bot.tree.command(name="viewblocklist", description="查看你封鎖的使用者", guild=discord.Object(id=GUILD_ID))
@@ -508,31 +496,4 @@ def run_flask():
     app.run(host="0.0.0.0", port=5000)
 
 threading.Thread(target=run_flask, daemon=True).start()
-
-@tasks.loop(seconds=30)
-async def schedule_checker():
-    print("🔁 檢查排程中...")
-    session = Session()
-    now = datetime.now(TW_TZ)
-    due_schedules = session.query(Schedule).filter(Schedule.scheduled_time <= now).all()
-    for sched in due_schedules:
-        print(f"⏰ 建立排程頻道：{sched.channel_name}")
-        await create_scheduled_channel(bot, sched)
-        session.delete(sched)
-    session.commit()
-    session.close()
-
-# === [2] 等待 bot 準備好後才開始檢查排程 ===
-@schedule_checker.before_loop
-async def before_schedule_checker():
-    await bot.wait_until_ready()
-
-# === [3] bot 啟動時同時啟用排程檢查 ===
-@bot.event
-async def on_ready():
-    print(f'Bot 已登入為 {bot.user}')
-    if not schedule_checker.is_running():
-        schedule_checker.start()
-        print("✅ 排程檢查啟動")
-
 bot.run(TOKEN) 
