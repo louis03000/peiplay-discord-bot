@@ -44,7 +44,8 @@ engine = create_engine(
     pool_size=5,
     max_overflow=10,
     pool_pre_ping=True,  # 自動重連
-    pool_recycle=3600,   # 1小時後回收連接
+    pool_recycle=1800,   # 30分鐘後回收連接
+    pool_timeout=30,     # 連接超時30秒
     echo=False
 )
 Session = sessionmaker(bind=engine)
@@ -1628,7 +1629,7 @@ async def check_bookings():
                             # 如果找不到文字頻道，創建一個臨時的
                             try:
                                 text_channel = await guild.create_text_channel(
-                                    name=f"📝{date_str}-{start_time_str}-{end_time_str}",
+                                    name=f"📅{date_str} {start_time_str}-{end_time_str} {cute_item}",
                                     overwrites={
                                         guild.default_role: discord.PermissionOverwrite(view_channel=False),
                                         customer_member: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
