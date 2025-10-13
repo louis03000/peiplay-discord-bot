@@ -818,6 +818,129 @@ async def auto_close_available_now():
     except Exception as e:
         print(f"❌ 自動關閉「現在有空」狀態時發生錯誤: {e}")
 
+# --- 檢查即時預約並立即創建文字頻道 ---
+@tasks.loop(seconds=30)  # 每30秒檢查一次
+async def check_instant_bookings_for_text_channel():
+    """檢查新的即時預約並立即創建文字頻道"""
+    await bot.wait_until_ready()
+    
+    try:
+        with Session() as s:
+            # 查詢即時預約：已確認但還沒有文字頻道的
+            query = """
+                SELECT 
+                    b.id, b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
+                    c.name as customer_name, cu.discord as customer_discord,
+                    p.name as partner_name, pu.discord as partner_discord,
+                    s."startTime", s."endTime"
+                FROM "Booking" b
+                JOIN "Schedule" s ON s.id = b."scheduleId"
+                JOIN "Customer" c ON c.id = b."customerId"
+                JOIN "User" cu ON cu.id = c."userId"
+                JOIN "Partner" p ON p.id = s."partnerId"
+                JOIN "User" pu ON pu.id = p."userId"
+                WHERE b.status IN ('CONFIRMED', 'PAID_WAITING_PARTNER_CONFIRMATION')
+                AND b."paymentInfo"->>'isInstantBooking' = 'true'
+                AND b."discordTextChannelId" IS NULL
+            """
+            
+            result = s.execute(text(query))
+            
+            for row in result:
+                try:
+                    booking_id = row.id
+                    
+                    # 檢查是否已經處理過
+                    if booking_id in processed_text_channels:
+                        continue
+                    
+                    customer_discord = row.customer_discord
+                    partner_discord = row.partner_discord
+                    
+                    if not customer_discord or not partner_discord:
+                        print(f"⚠️ 預約 {booking_id} 缺少 Discord ID，跳過")
+                        continue
+                    
+                    guild = bot.get_guild(GUILD_ID)
+                    if not guild:
+                        print("❌ 找不到 Discord 伺服器")
+                        continue
+                    
+                    # 獲取成員
+                    customer_member = guild.get_member(int(customer_discord))
+                    partner_member = guild.get_member(int(partner_discord))
+                    
+                    if not customer_member or not partner_member:
+                        print(f"⚠️ 找不到成員")
+                        continue
+                    
+                    # 生成頻道名稱
+                    start_time = row.startTime
+                    end_time = row.endTime
+                    cute_item = random.choice(CUTE_ITEMS)
+                    
+                    start_time_tw = start_time.astimezone(TW_TZ)
+                    end_time_tw = end_time.astimezone(TW_TZ)
+                    
+                    date_str = start_time_tw.strftime("%m/%d")
+                    start_time_str = start_time_tw.strftime("%H:%M")
+                    end_time_str = end_time_tw.strftime("%H:%M")
+                    
+                    text_channel_name = f"📅{date_str} {start_time_str}-{end_time_str} {cute_item}"
+                    
+                    # 檢查頻道是否已存在
+                    existing_channel = discord.utils.get(guild.text_channels, name=text_channel_name)
+                    if existing_channel:
+                        print(f"⚠️ 文字頻道已存在: {text_channel_name}")
+                        continue
+                    
+                    # 創建文字頻道
+                    category = discord.utils.get(guild.categories, name="文字頻道")
+                    if not category:
+                        category = await guild.create_category("文字頻道")
+                    
+                    text_channel = await guild.create_text_channel(
+                        name=text_channel_name,
+                        category=category,
+                        overwrites={
+                            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                            customer_member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                            partner_member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+                        }
+                    )
+                    
+                    # 更新資料庫
+                    with Session() as update_s:
+                        update_s.execute(
+                            text("UPDATE \"Booking\" SET \"discordTextChannelId\" = :channel_id WHERE id = :booking_id"),
+                            {"channel_id": str(text_channel.id), "booking_id": booking_id}
+                        )
+                        update_s.commit()
+                    
+                    # 標記為已處理
+                    processed_text_channels.add(booking_id)
+                    
+                    # 發送歡迎訊息
+                    embed = discord.Embed(
+                        title="🎮 即時預約溝通頻道",
+                        description=f"歡迎 {customer_member.mention} 和 {partner_member.mention}！",
+                        color=0x00ff00
+                    )
+                    embed.add_field(name="預約時間", value=f"{start_time_str} - {end_time_str}", inline=True)
+                    embed.add_field(name="⏰ 提醒", value="語音頻道將在預約開始前5分鐘自動創建", inline=False)
+                    embed.add_field(name="💬 溝通", value="請在這裡提前溝通遊戲相關事宜", inline=False)
+                    
+                    await text_channel.send(embed=embed)
+                    
+                    print(f"✅ 已為即時預約 {booking_id} 創建文字頻道: {text_channel_name}")
+                    
+                except Exception as e:
+                    print(f"❌ 處理即時預約 {row.id} 時發生錯誤: {e}")
+                    continue
+                    
+    except Exception as e:
+        print(f"❌ 檢查即時預約時發生錯誤: {e}")
+
 # --- 清理過期頻道任務 ---
 @tasks.loop(seconds=60)  # 每1分鐘檢查一次
 async def cleanup_expired_channels():
@@ -2069,6 +2192,7 @@ async def on_ready():
         # 啟動自動檢查任務
         check_bookings.start()
         check_new_bookings.start()
+        check_instant_bookings_for_text_channel.start()  # 新增：即時預約文字頻道
         cleanup_expired_channels.start()
         auto_close_available_now.start()
         check_missing_ratings.start()
