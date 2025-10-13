@@ -867,8 +867,12 @@ async def check_instant_bookings_for_text_channel():
                         continue
                     
                     # 獲取成員
-                    customer_member = guild.get_member(int(customer_discord))
-                    partner_member = guild.get_member(int(partner_discord))
+                    try:
+                        customer_member = guild.get_member(int(float(customer_discord)))
+                        partner_member = guild.get_member(int(float(partner_discord)))
+                    except (ValueError, TypeError):
+                        print(f"⚠️ Discord ID 格式錯誤: customer={customer_discord}, partner={partner_discord}")
+                        continue
                     
                     if not customer_member or not partner_member:
                         print(f"⚠️ 找不到成員")
@@ -1433,8 +1437,29 @@ async def check_bookings():
                         continue
                     
                     # 查找 Discord 成員
-                    customer_member = find_member_by_discord_name(guild, customer_discord)
-                    partner_member = find_member_by_discord_name(guild, partner_discord)
+                    customer_member = None
+                    partner_member = None
+                    
+                    # 嘗試根據 Discord ID 查找成員
+                    try:
+                        if customer_discord and customer_discord.replace('.', '').replace('-', '').isdigit():
+                            # 如果是數字格式的 ID
+                            customer_member = guild.get_member(int(float(customer_discord)))
+                        else:
+                            # 如果是名稱格式
+                            customer_member = find_member_by_discord_name(guild, customer_discord)
+                    except (ValueError, TypeError):
+                        print(f"⚠️ 顧客 Discord ID 格式錯誤: {customer_discord}")
+                    
+                    try:
+                        if partner_discord and partner_discord.replace('.', '').replace('-', '').isdigit():
+                            # 如果是數字格式的 ID
+                            partner_member = guild.get_member(int(float(partner_discord)))
+                        else:
+                            # 如果是名稱格式
+                            partner_member = find_member_by_discord_name(guild, partner_discord)
+                    except (ValueError, TypeError):
+                        print(f"⚠️ 夥伴 Discord ID 格式錯誤: {partner_discord}")
                     
                     if not customer_member or not partner_member:
                         print(f"❌ 找不到 Discord 成員: 顧客={customer_discord}, 夥伴={partner_discord}")
