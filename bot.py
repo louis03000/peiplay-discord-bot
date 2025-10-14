@@ -874,8 +874,16 @@ async def check_instant_bookings_for_text_channel():
             """
             
             result = s.execute(text(query), {"now": now})
+            rows = result.fetchall()
             
-            for row in result:
+            if len(rows) > 0:
+                print(f"🔍 找到 {len(rows)} 個即時預約需要創建文字頻道")
+                for row in rows:
+                    print(f"  - 預約ID: {row.id}, 開始時間: {row.startTime}, 狀態: {row.status}")
+            else:
+                print(f"🔍 沒有找到需要創建文字頻道的即時預約")
+            
+            for row in rows:
                 try:
                     booking_id = row.id
                     
