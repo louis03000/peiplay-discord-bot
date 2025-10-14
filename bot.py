@@ -754,6 +754,7 @@ async def check_new_bookings():
                 WHERE b.status IN ('CONFIRMED', 'PAID_WAITING_PARTNER_CONFIRMATION')
                 AND s."startTime" <= :five_minutes_from_now
                 AND s."startTime" > :now
+                AND s."endTime" > :now
                 AND b."discordTextChannelId" IS NULL
             """
             result = s.execute(text(query), {
@@ -1381,7 +1382,8 @@ async def check_bookings():
             AND b."paymentInfo"->>'isInstantBooking' = 'true'
             AND s."startTime" >= :instant_start_time_1
             AND s."startTime" <= :instant_start_time_2
-        AND b."discordVoiceChannelId" IS NULL
+            AND b."discordVoiceChannelId" IS NULL
+            AND s."endTime" > :current_time
         """
         
         try:
@@ -1390,7 +1392,7 @@ async def check_bookings():
                 result = s.execute(text(query), {"start_time_1": window_start, "start_time_2": window_end, "current_time": now})
                 
                 # 查詢即時預約
-                instant_result = s.execute(text(instant_query), {"instant_start_time_1": instant_window_start, "instant_start_time_2": instant_window_end})
+                instant_result = s.execute(text(instant_query), {"instant_start_time_1": instant_window_start, "instant_start_time_2": instant_window_end, "current_time": now})
                 
                 # 添加調試信息（只在有預約時顯示）
                 # print(f"🔍 檢查預約時間窗口: {window_start} 到 {window_end}")
