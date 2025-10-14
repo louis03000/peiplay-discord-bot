@@ -276,7 +276,7 @@ async def create_booking_text_channel(booking_id, customer_discord, partner_disc
                        f"👤 **顧客**: {customer_member.mention}\n"
                        f"👥 **夥伴**: {partner_member.mention}\n\n"
                        f"💬 你們可以在這裡提前溝通\n"
-                       f"🎤 語音頻道將在預約開始前 5 分鐘自動創建",
+                       f"🎤 語音頻道將在預約開始前 3 分鐘自動創建",
             color=0x00ff00
         )
         
@@ -971,7 +971,7 @@ async def check_instant_bookings_for_text_channel():
                         color=0x00ff00
                     )
                     embed.add_field(name="預約時間", value=f"{start_time_str} - {end_time_str}", inline=True)
-                    embed.add_field(name="⏰ 提醒", value="語音頻道將在預約開始前5分鐘自動創建", inline=False)
+                    embed.add_field(name="⏰ 提醒", value="語音頻道將在預約開始前3分鐘自動創建", inline=False)
                     embed.add_field(name="💬 溝通", value="請在這裡提前溝通遊戲相關事宜", inline=False)
                     
                     await text_channel.send(embed=embed)
