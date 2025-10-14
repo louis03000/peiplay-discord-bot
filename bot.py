@@ -852,7 +852,8 @@ async def check_instant_bookings_for_text_channel():
     
     try:
         with Session() as s:
-            # 查詢即時預約：已確認但還沒有文字頻道的
+            # 查詢即時預約：已確認但還沒有文字頻道的（只處理未來的預約）
+            now = datetime.now(timezone.utc)
             query = """
                 SELECT 
                     b.id, b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
@@ -868,9 +869,10 @@ async def check_instant_bookings_for_text_channel():
                 WHERE b.status IN ('CONFIRMED', 'PAID_WAITING_PARTNER_CONFIRMATION')
                 AND b."paymentInfo"->>'isInstantBooking' = 'true'
                 AND b."discordTextChannelId" IS NULL
+                AND s."startTime" > :now
             """
             
-            result = s.execute(text(query))
+            result = s.execute(text(query), {"now": now})
             
             for row in result:
                 try:
