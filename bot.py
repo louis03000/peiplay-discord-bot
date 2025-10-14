@@ -171,8 +171,34 @@ async def create_booking_text_channel(booking_id, customer_discord, partner_disc
             return None
         
         # 查找 Discord 成員
-        customer_member = find_member_by_discord_name(guild, customer_discord)
-        partner_member = find_member_by_discord_name(guild, partner_discord)
+        customer_member = None
+        partner_member = None
+        
+        # 處理顧客 Discord ID
+        if customer_discord:
+            try:
+                if customer_discord.replace('.', '').replace('-', '').isdigit():
+                    # 如果是數字格式的 ID
+                    customer_member = guild.get_member(int(float(customer_discord)))
+                else:
+                    # 如果是名稱格式
+                    customer_member = find_member_by_discord_name(guild, customer_discord)
+            except (ValueError, TypeError):
+                # 靜默處理無效的 Discord ID
+                customer_member = None
+        
+        # 處理夥伴 Discord ID
+        if partner_discord:
+            try:
+                if partner_discord.replace('.', '').replace('-', '').isdigit():
+                    # 如果是數字格式的 ID
+                    partner_member = guild.get_member(int(float(partner_discord)))
+                else:
+                    # 如果是名稱格式
+                    partner_member = find_member_by_discord_name(guild, partner_discord)
+            except (ValueError, TypeError):
+                # 靜默處理無效的 Discord ID
+                partner_member = None
         
         if not customer_member or not partner_member:
             print(f"❌ 找不到 Discord 成員: 顧客={customer_discord}, 夥伴={partner_discord}")
@@ -867,12 +893,26 @@ async def check_instant_bookings_for_text_channel():
                         continue
                     
                     # 獲取成員
+                    customer_member = None
+                    partner_member = None
+                    
                     try:
-                        customer_member = guild.get_member(int(float(customer_discord)))
-                        partner_member = guild.get_member(int(float(partner_discord)))
+                        if customer_discord.replace('.', '').replace('-', '').isdigit():
+                            customer_member = guild.get_member(int(float(customer_discord)))
+                        else:
+                            customer_member = find_member_by_discord_name(guild, customer_discord)
                     except (ValueError, TypeError):
-                        print(f"⚠️ Discord ID 格式錯誤: customer={customer_discord}, partner={partner_discord}")
-                        continue
+                        # 靜默處理無效的 Discord ID
+                        customer_member = None
+                    
+                    try:
+                        if partner_discord.replace('.', '').replace('-', '').isdigit():
+                            partner_member = guild.get_member(int(float(partner_discord)))
+                        else:
+                            partner_member = find_member_by_discord_name(guild, partner_discord)
+                    except (ValueError, TypeError):
+                        # 靜默處理無效的 Discord ID
+                        partner_member = None
                     
                     if not customer_member or not partner_member:
                         print(f"⚠️ 找不到成員")
@@ -1440,26 +1480,31 @@ async def check_bookings():
                     customer_member = None
                     partner_member = None
                     
-                    # 嘗試根據 Discord ID 查找成員
-                    try:
-                        if customer_discord and customer_discord.replace('.', '').replace('-', '').isdigit():
-                            # 如果是數字格式的 ID
-                            customer_member = guild.get_member(int(float(customer_discord)))
-                        else:
-                            # 如果是名稱格式
-                            customer_member = find_member_by_discord_name(guild, customer_discord)
-                    except (ValueError, TypeError):
-                        print(f"⚠️ 顧客 Discord ID 格式錯誤: {customer_discord}")
+                    # 處理顧客 Discord ID
+                    if customer_discord:
+                        try:
+                            if customer_discord.replace('.', '').replace('-', '').isdigit():
+                                # 如果是數字格式的 ID
+                                customer_member = guild.get_member(int(float(customer_discord)))
+                            else:
+                                # 如果是名稱格式
+                                customer_member = find_member_by_discord_name(guild, customer_discord)
+                        except (ValueError, TypeError):
+                            # 靜默處理無效的 Discord ID，不顯示警告
+                            customer_member = None
                     
-                    try:
-                        if partner_discord and partner_discord.replace('.', '').replace('-', '').isdigit():
-                            # 如果是數字格式的 ID
-                            partner_member = guild.get_member(int(float(partner_discord)))
-                        else:
-                            # 如果是名稱格式
-                            partner_member = find_member_by_discord_name(guild, partner_discord)
-                    except (ValueError, TypeError):
-                        print(f"⚠️ 夥伴 Discord ID 格式錯誤: {partner_discord}")
+                    # 處理夥伴 Discord ID
+                    if partner_discord:
+                        try:
+                            if partner_discord.replace('.', '').replace('-', '').isdigit():
+                                # 如果是數字格式的 ID
+                                partner_member = guild.get_member(int(float(partner_discord)))
+                            else:
+                                # 如果是名稱格式
+                                partner_member = find_member_by_discord_name(guild, partner_discord)
+                        except (ValueError, TypeError):
+                            # 靜默處理無效的 Discord ID，不顯示警告
+                            partner_member = None
                     
                     if not customer_member or not partner_member:
                         print(f"❌ 找不到 Discord 成員: 顧客={customer_discord}, 夥伴={partner_discord}")
@@ -2141,14 +2186,14 @@ class ExtendView(View):
         super().__init__(timeout=None)
         self.vc_id = vc_id
 
-    @discord.ui.button(label="🔁 延長 10 分鐘", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="🔁 延長 5 分鐘", style=discord.ButtonStyle.primary)
     async def extend_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.vc_id not in active_voice_channels:
             await interaction.response.send_message("❗ 頻道資訊不存在或已刪除。", ephemeral=True)
             return
-        active_voice_channels[self.vc_id]['remaining'] += 600
+        active_voice_channels[self.vc_id]['remaining'] += 300
         active_voice_channels[self.vc_id]['extended'] += 1
-        await interaction.response.send_message("⏳ 已延長 10 分鐘。", ephemeral=True)
+        await interaction.response.send_message("⏳ 已延長 5 分鐘。", ephemeral=True)
 
 # --- Bot 啟動 ---
 @bot.event
@@ -2488,7 +2533,7 @@ async def countdown(vc_id, animal_channel_name, text_channel, vc, interaction, m
                     await user.move_to(vc)
 
         view = ExtendView(vc.id)
-        await text_channel.send(f"🎉 語音頻道 {vc.name} 已開啟！\n⏳ 可延長10分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。", view=view)
+        await text_channel.send(f"🎉 語音頻道 {vc.name} 已開啟！\n⏳ 可延長5分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。", view=view)
 
         while active_voice_channels[vc_id]['remaining'] > 0:
             remaining = active_voice_channels[vc_id]['remaining']
@@ -2900,7 +2945,7 @@ def pair_users():
                         await user2.move_to(voice_channel)
                     
                     # 發送歡迎訊息（與手動創建相同）
-                    await text_channel.send(f"🎉 語音頻道 {channel_name} 已開啟！\n⏳ 可延長10分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。")
+                    await text_channel.send(f"🎉 語音頻道 {channel_name} 已開啟！\n⏳ 可延長5分鐘 ( 為了您有更好的遊戲體驗，請到最後需要時再點選 ) 。")
                     
                     print(f"✅ 成功創建排程配對頻道: {channel_name}")
                     
