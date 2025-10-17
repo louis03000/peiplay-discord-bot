@@ -297,6 +297,42 @@ async def create_booking_text_channel(booking_id, customer_discord, partner_disc
         
         await text_channel.send(embed=embed)
         
+        # 發送安全規範
+        safety_embed = discord.Embed(
+            title="🎙️ 聊天頻道使用規範與警告",
+            description="為了您的安全，請務必遵守以下規範：",
+            color=0xff6b6b,
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        safety_embed.add_field(
+            name="📌 頻道性質",
+            value="此語音頻道為【單純聊天用途】。\n僅限輕鬆互動、日常話題、遊戲閒聊使用。\n禁止任何涉及交易、暗示、或其他非聊天用途的行為。",
+            inline=False
+        )
+        
+        safety_embed.add_field(
+            name="⚠️ 使用規範（請務必遵守）",
+            value="• 禁止挑釁、辱罵、騷擾他人，保持禮貌尊重\n"
+                  "• 禁止使用色情、暴力、血腥、歧視等不當言語或內容\n"
+                  "• 不得進行金錢交易、索取或提供個資（例如 LINE、IG、電話）\n"
+                  "• 不得錄音、偷拍或截圖他人對話，除非經雙方同意\n"
+                  "• 禁止語音假裝、惡意模仿或干擾他人聊天\n"
+                  "• 禁止使用變聲器或播放音效干擾頻道秩序",
+            inline=False
+        )
+        
+        safety_embed.add_field(
+            name="🚨 警告事項",
+            value="• 系統將隨機錄取部分語音內容以進行安全稽核\n"
+                  "• 如被舉報違規，管理員可立即封鎖或禁言，不另行通知\n"
+                  "• 為了您的安全，禁止隨意透漏個人資訊，包括(身分證、住家地址、等等......)\n"
+                  "• 若你無法接受以上規範，請勿加入頻道",
+            inline=False
+        )
+        
+        await text_channel.send(embed=safety_embed)
+        
         # 發送預約通知到指定頻道
         notification_channel = bot.get_channel(1419585779432423546)
         if notification_channel:
@@ -2148,6 +2184,15 @@ async def check_bookings():
                         
                         # 啟動延遲開啟任務
                         bot.loop.create_task(delayed_open_voice())
+                        
+                        # 啟動倒數計時任務（包含評價系統）
+                        if text_channel:
+                            bot.loop.create_task(countdown_with_rating(
+                                vc.id, channel_name, text_channel, vc, 
+                                [customer_member, partner_member], 
+                                [customer_member, partner_member], 
+                                record_id, booking.id
+                            ))
                         
                     else:
                         # 通知創建頻道頻道 - 修正時區顯示
