@@ -1061,35 +1061,47 @@ async def auto_close_available_now():
         print(f"❌ 自動關閉「現在有空」狀態時發生錯誤: {e}")
 
 # --- 檢查即時預約並立即創建文字頻道 ---
-@tasks.loop(seconds=30)  # 每30秒檢查一次
+@tasks.loop(seconds=60)  # 每60秒檢查一次，減少資料庫負載
 async def check_instant_bookings_for_text_channel():
     """檢查新的即時預約並立即創建文字頻道"""
     await bot.wait_until_ready()
     
     try:
-        with Session() as s:
-            # 查詢即時預約：已確認但還沒有文字頻道的（只處理未來的預約）
-            now = datetime.now(timezone.utc)
-            query = """
-                SELECT 
-                    b.id, b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
-                    c.name as customer_name, cu.discord as customer_discord,
-                    p.name as partner_name, pu.discord as partner_discord,
-                    s."startTime", s."endTime"
-                FROM "Booking" b
-                JOIN "Schedule" s ON s.id = b."scheduleId"
-                JOIN "Customer" c ON c.id = b."customerId"
-                JOIN "User" cu ON cu.id = c."userId"
-                JOIN "Partner" p ON p.id = s."partnerId"
-                JOIN "User" pu ON pu.id = p."userId"
-                WHERE b.status = 'CONFIRMED'
-                AND b."paymentInfo"->>'isInstantBooking' = 'true'
-                AND b."discordTextChannelId" IS NULL
-                AND s."startTime" > :now
-            """
-            
-            result = s.execute(text(query), {"now": now})
-            rows = result.fetchall()
+        # 添加連接重試機制
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with Session() as s:
+                    # 查詢即時預約：已確認但還沒有文字頻道的（只處理未來的預約）
+                    now = datetime.now(timezone.utc)
+                    query = """
+                        SELECT 
+                            b.id, b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
+                            c.name as customer_name, cu.discord as customer_discord,
+                            p.name as partner_name, pu.discord as partner_discord,
+                            s."startTime", s."endTime"
+                        FROM "Booking" b
+                        JOIN "Schedule" s ON s.id = b."scheduleId"
+                        JOIN "Customer" c ON c.id = b."customerId"
+                        JOIN "User" cu ON cu.id = c."userId"
+                        JOIN "Partner" p ON p.id = s."partnerId"
+                        JOIN "User" pu ON pu.id = p."userId"
+                        WHERE b.status = 'CONFIRMED'
+                        AND b."paymentInfo"->>'isInstantBooking' = 'true'
+                        AND b."discordTextChannelId" IS NULL
+                        AND s."startTime" > :now
+                    """
+                    
+                    result = s.execute(text(query), {"now": now})
+                    rows = result.fetchall()
+                    break  # 成功執行，跳出重試循環
+            except Exception as db_error:
+                if attempt < max_retries - 1:
+                    print(f"⚠️ 資料庫連接失敗，重試 {attempt + 1}/{max_retries}: {db_error}")
+                    await asyncio.sleep(2 ** attempt)  # 指數退避
+                else:
+                    print(f"❌ 資料庫連接失敗，已重試 {max_retries} 次: {db_error}")
+                    return
             
             if len(rows) > 0:
                 print(f"🔍 找到 {len(rows)} 個即時預約需要創建文字頻道")
@@ -1402,7 +1414,7 @@ async def check_booking_timeouts():
         print(f"❌ 檢查超時預約時發生錯誤: {e}")
 
 # --- 檢查遺失評價任務 ---
-@tasks.loop(seconds=300)  # 每5分鐘檢查一次
+@tasks.loop(seconds=600)  # 每10分鐘檢查一次，減少資料庫負載
 async def check_missing_ratings():
     """檢查遺失的評價並自動提交"""
     await bot.wait_until_ready()
@@ -2012,29 +2024,36 @@ async def check_bookings():
                     except Exception as e:
                         print(f"❌ 查找文字頻道失敗: {e}")
                     
-                    # 創建配對記錄
+                    # 創建配對記錄 - 檢查是否已存在
                     user1_id = str(customer_member.id)
                     user2_id = str(partner_member.id)
                     
-                    # 添加調試信息
-                    # 自動創建配對記錄，減少日誌輸出
-                    
                     try:
-                        # 生成唯一的 ID
-                        import uuid
-                        record_id = str(uuid.uuid4())
+                        # 先檢查是否已經存在配對記錄
+                        existing_record = s.execute(
+                            text("SELECT id FROM \"PairingRecord\" WHERE \"bookingId\" = :booking_id"),
+                            {"booking_id": booking.id}
+                        ).fetchone()
                         
-                        record = PairingRecord(
-                            id=record_id,
-                            user1Id=user1_id,
-                            user2Id=user2_id,
-                            duration=duration_minutes * 60,
-                            animalName="預約頻道",  # 修正未定義的 animal 變數
-                            bookingId=booking.id
-                        )
-                        s.add(record)
-                        s.commit()
-                        record_id = record.id  # 保存 ID，避免 Session 關閉後無法訪問
+                        if existing_record:
+                            record_id = existing_record[0]
+                            print(f"✅ 使用現有配對記錄: {record_id}")
+                        else:
+                            # 生成唯一的 ID
+                            import uuid
+                            record_id = str(uuid.uuid4())
+                            
+                            record = PairingRecord(
+                                id=record_id,
+                                user1Id=user1_id,
+                                user2Id=user2_id,
+                                duration=duration_minutes * 60,
+                                animalName="預約頻道",
+                                bookingId=booking.id
+                            )
+                            s.add(record)
+                            s.commit()
+                            print(f"✅ 創建新配對記錄: {record_id}")
                     except Exception as e:
                         print(f"❌ 創建配對記錄失敗: {e}")
                         # 如果表不存在，使用預設的 record_id
@@ -2280,7 +2299,7 @@ async def check_bookings():
         print(f"❌ 檢查預約時發生錯誤: {e}")
 
 # --- 檢查即時預約的定時功能 ---
-@tasks.loop(seconds=CHECK_INTERVAL)
+@tasks.loop(seconds=120)  # 每2分鐘檢查一次，減少資料庫負載
 async def check_instant_booking_timing():
     """檢查即時預約的定時功能：10分鐘提醒、5分鐘延長按鈕、評價系統、頻道刪除"""
     await bot.wait_until_ready()
