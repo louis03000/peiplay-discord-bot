@@ -133,6 +133,47 @@ class PairingRecord(Base):
     createdAt = Column('createdAt', DateTime, default=datetime.utcnow)
     updatedAt = Column('updatedAt', DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class GroupBooking(Base):
+    __tablename__ = "GroupBooking"
+    
+    id = Column(String, primary_key=True)
+    type = Column(String)  # USER_INITIATED, PARTNER_INITIATED
+    title = Column(String)
+    description = Column(String)
+    date = Column(DateTime)
+    startTime = Column(DateTime)
+    endTime = Column(DateTime)
+    maxParticipants = Column(Integer, default=10)
+    currentParticipants = Column(Integer, default=0)
+    pricePerPerson = Column(Float)
+    totalPrice = Column(Float)
+    status = Column(String, default='ACTIVE')  # ACTIVE, COMPLETED, CANCELLED, FULL
+    createdAt = Column(DateTime, default=datetime.utcnow)
+    updatedAt = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    initiatorId = Column(String)
+    initiatorType = Column(String)  # USER, PARTNER
+
+class GroupBookingParticipant(Base):
+    __tablename__ = "GroupBookingParticipant"
+    
+    id = Column(String, primary_key=True)
+    groupBookingId = Column(String)
+    customerId = Column(String)
+    partnerId = Column(String)
+    status = Column(String, default='ACTIVE')  # ACTIVE, CANCELLED, COMPLETED
+    joinedAt = Column(DateTime, default=datetime.utcnow)
+
+class GroupBookingReview(Base):
+    __tablename__ = "GroupBookingReview"
+    
+    id = Column(String, primary_key=True)
+    groupBookingId = Column(String)
+    reviewerId = Column(String)
+    rating = Column(Integer)
+    comment = Column(String)
+    createdAt = Column(DateTime, default=datetime.utcnow)
+    isApproved = Column(Boolean, default=False)
+
 class BlockRecord(Base):
     __tablename__ = 'block_records'
     id = Column(Integer, primary_key=True)
@@ -588,6 +629,424 @@ async def create_group_booking_voice_channel(group_booking_id, customer_discord,
     except Exception as e:
         print(f"❌ 創建多人開團語音頻道失敗: {e}")
         return None
+
+async def create_group_booking_text_channel(group_booking_id, customer_discord, partner_discords, start_time, end_time):
+    """為多人開團創建文字頻道"""
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            print("❌ 找不到 Discord 伺服器")
+            return None
+        
+        # 查找所有成員
+        customer_member = find_member_by_discord_name(guild, customer_discord)
+        if not customer_member:
+            print(f"❌ 找不到顧客: {customer_discord}")
+            return None
+        
+        partner_members = []
+        for partner_discord in partner_discords:
+            partner_member = find_member_by_discord_name(guild, partner_discord)
+            if partner_member:
+                partner_members.append(partner_member)
+            else:
+                print(f"⚠️ 找不到夥伴: {partner_discord}")
+        
+        if not partner_members:
+            print("❌ 找不到任何夥伴")
+            return None
+        
+        # 生成頻道名稱
+        animal = random.choice(CUTE_ITEMS)
+        channel_name = f"👥{animal}多人開團聊天"
+        
+        # 轉換為台灣時間
+        start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+        tw_start_time = start_dt.astimezone(timezone(timedelta(hours=8)))
+        
+        # 創建分類
+        category = discord.utils.get(guild.categories, name="Voice Channels")
+        if not category:
+            category = discord.utils.get(guild.categories, name="語音頻道")
+        if not category:
+            category = discord.utils.get(guild.categories, name="語音")
+        if not category:
+            if guild.categories:
+                category = guild.categories[0]
+            else:
+                print("❌ 找不到任何分類")
+                return None
+        
+        # 設定權限
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            customer_member: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+        }
+        
+        # 為所有夥伴添加權限
+        for partner_member in partner_members:
+            overwrites[partner_member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        
+        # 創建文字頻道
+        text_channel = await guild.create_text_channel(
+            name=channel_name,
+            category=category,
+            overwrites=overwrites
+        )
+        
+        # 發送歡迎訊息
+        welcome_embed = discord.Embed(
+            title="🎮 多人開團聊天頻道",
+            description="歡迎來到多人開團聊天頻道！",
+            color=0x9b59b6,
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        welcome_embed.add_field(
+            name="👤 顧客",
+            value=f"{customer_member.mention}",
+            inline=True
+        )
+        
+        partner_mentions = [partner.mention for partner in partner_members]
+        welcome_embed.add_field(
+            name="👥 夥伴們",
+            value="\n".join(partner_mentions),
+            inline=False
+        )
+        
+        welcome_embed.add_field(
+            name="⏰ 開始時間",
+            value=f"`{tw_start_time.strftime('%Y/%m/%d %H:%M')}`",
+            inline=True
+        )
+        
+        welcome_embed.add_field(
+            name="📋 群組預約ID",
+            value=f"`{group_booking_id}`",
+            inline=True
+        )
+        
+        await text_channel.send(embed=welcome_embed)
+        
+        # 發送安全規範
+        safety_embed = discord.Embed(
+            title="🎙️ 多人開團聊天頻道使用規範與警告",
+            description="為了您的安全，請務必遵守以下規範：",
+            color=0xff6b6b,
+            timestamp=datetime.now(timezone.utc)
+        )
+        safety_embed.add_field(
+            name="📌 頻道性質",
+            value="此聊天頻道為【多人開團用途】。\n僅限遊戲討論、戰術交流、團隊協作使用。\n禁止任何涉及交易、暗示、或其他非遊戲用途的行為。",
+            inline=False
+        )
+        safety_embed.add_field(
+            name="⚠️ 使用規範（請務必遵守）",
+            value="• 禁止挑釁、辱罵、騷擾他人，保持禮貌尊重\n"
+                  "• 禁止使用色情、暴力、血腥、歧視等不當言語或內容\n"
+                  "• 不得進行金錢交易、索取或提供個資（例如 LINE、IG、電話）\n"
+                  "• 不得錄音、偷拍或截圖他人對話，除非經雙方同意\n"
+                  "• 禁止惡意模仿或干擾他人聊天\n"
+                  "• 禁止使用變聲器或播放音效干擾頻道秩序",
+            inline=False
+        )
+        safety_embed.add_field(
+            name="🚨 警告事項",
+            value="• 系統將隨機錄取部分聊天內容以進行安全稽核\n"
+                  "• 如被舉報違規，管理員可立即封鎖或禁言，不另行通知\n"
+                  "• 為了您的安全，禁止隨意透漏個人資訊，包括(身分證、住家地址、等等......)\n"
+                  "• 若你無法接受以上規範，請勿加入頻道",
+            inline=False
+        )
+        await text_channel.send(embed=safety_embed)
+        
+        print(f"✅ 多人開團文字頻道已創建: {channel_name} (群組 {group_booking_id})")
+        return text_channel
+        
+    except Exception as e:
+        print(f"❌ 創建多人開團文字頻道失敗: {e}")
+        return None
+
+async def countdown_with_group_rating(vc_id, channel_name, text_channel, vc, members, record_id, group_booking_id):
+    """多人開團的倒數計時函數，包含評價系統"""
+    try:
+        # 獲取 guild 對象
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            print(f"❌ 找不到 Guild ID: {GUILD_ID}")
+            return
+        
+        # 計算預約結束時間
+        now = datetime.now(timezone.utc)
+        
+        # 從資料庫獲取預約結束時間
+        with Session() as s:
+            result = s.execute(text("""
+                SELECT gb."endTime", gb."currentParticipants", gb."maxParticipants"
+                FROM "GroupBooking" gb
+                WHERE gb.id = :group_booking_id
+            """), {"group_booking_id": group_booking_id}).fetchone()
+            
+            if not result:
+                print(f"❌ 找不到群組預約記錄: {group_booking_id}")
+                return
+            
+            end_time = result[0]
+            current_participants = result[1]
+            max_participants = result[2]
+        
+        # 計算剩餘時間
+        remaining_seconds = int((end_time - now).total_seconds())
+        
+        if remaining_seconds <= 0:
+            print(f"⏰ 群組預約 {group_booking_id} 已結束")
+            await text_channel.send("⏰ 多人開團時間已結束！")
+            await show_group_rating_system(text_channel, group_booking_id, members)
+            return
+        
+        # 等待到結束時間
+        await asyncio.sleep(remaining_seconds)
+        
+        # 時間結束，顯示評價系統
+        await text_channel.send("⏰ 多人開團時間已結束！")
+        await show_group_rating_system(text_channel, group_booking_id, members)
+        
+    except Exception as e:
+        print(f"❌ 多人開團倒數計時錯誤: {e}")
+
+async def show_group_rating_system(text_channel, group_booking_id, members):
+    """顯示多人開團評價系統"""
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            print(f"❌ 找不到 Guild ID: {GUILD_ID}")
+            return
+        
+        # 創建評價頻道
+        evaluation_channel_name = f"📝多人開團評價-{group_booking_id[:8]}"
+        
+        # 設置頻道權限
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        }
+        
+        # 添加所有成員權限
+        for member in members:
+            if member:
+                overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        
+        # 獲取分類
+        category = discord.utils.get(guild.categories, name="Voice Channels")
+        if not category:
+            category = discord.utils.get(guild.categories, name="語音頻道")
+        if not category:
+            category = discord.utils.get(guild.categories, name="語音")
+        if not category:
+            if guild.categories:
+                category = guild.categories[0]
+            else:
+                print("❌ 找不到任何分類")
+                return
+        
+        evaluation_channel = await guild.create_text_channel(
+            name=evaluation_channel_name,
+            category=category,
+            overwrites=overwrites
+        )
+        
+        # 發送評價提示訊息
+        embed = discord.Embed(
+            title="⭐ 多人開團結束 - 請進行整體評價",
+            description="感謝您參與多人開團！請花一點時間為這次開團體驗進行評價。",
+            color=0xffd700
+        )
+        embed.add_field(
+            name="📝 評價說明",
+            value="• 評分範圍：1-5 星\n• 留言為選填項目\n• 評價完全匿名\n• 評價結果會回報給管理員",
+            inline=False
+        )
+        embed.add_field(
+            name="👥 參與人數",
+            value=f"`{len(members)} 人`",
+            inline=True
+        )
+        embed.add_field(
+            name="🆔 群組ID",
+            value=f"`{group_booking_id}`",
+            inline=True
+        )
+        embed.set_footer(text="評價有助於我們提供更好的多人開團服務品質")
+        
+        await evaluation_channel.send(embed=embed)
+        await evaluation_channel.send("📝 請點擊以下按鈕進行匿名評分：")
+        
+        class GroupRatingView(View):
+            def __init__(self, group_booking_id):
+                super().__init__(timeout=600)  # 10分鐘超時
+                self.group_booking_id = group_booking_id
+                self.submitted_users = set()
+
+            @discord.ui.button(label="⭐ 匿名評分", style=discord.ButtonStyle.success, emoji="⭐")
+            async def submit_rating(self, interaction: discord.Interaction, button: Button):
+                if interaction.user.id in self.submitted_users:
+                    await interaction.response.send_message("❗ 您已經提交過評價。", ephemeral=True)
+                    return
+                
+                await interaction.response.send_modal(GroupRatingModal(self.group_booking_id, self))
+        
+        await evaluation_channel.send(view=GroupRatingView(group_booking_id))
+        
+        # 10分鐘後刪除評價頻道
+        await asyncio.sleep(600)
+        try:
+            await evaluation_channel.delete()
+            print(f"🗑️ 多人開團評價頻道已刪除: {evaluation_channel_name}")
+        except Exception as e:
+            print(f"❌ 刪除多人開團評價頻道失敗: {e}")
+        
+    except Exception as e:
+        print(f"❌ 顯示多人開團評價系統失敗: {e}")
+
+class GroupRatingModal(Modal, title="多人開團匿名評分與留言"):
+    rating = TextInput(label="給予評分（1～5 星）", required=True, placeholder="請輸入 1-5 的數字")
+    comment = TextInput(label="留下你的留言（選填）", required=False, placeholder="分享您的開團體驗...")
+
+    def __init__(self, group_booking_id, parent_view):
+        super().__init__()
+        self.group_booking_id = group_booking_id
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # 驗證評分
+            try:
+                rating = int(str(self.rating))
+                if rating < 1 or rating > 5:
+                    await interaction.response.send_message("❌ 評分必須在 1-5 之間", ephemeral=True)
+                    return
+            except ValueError:
+                await interaction.response.send_message("❌ 請輸入有效的數字", ephemeral=True)
+                return
+            
+            # 保存評價到資料庫
+            with Session() as s:
+                # 獲取客戶記錄
+                customer_result = s.execute(text("""
+                    SELECT c.id FROM "Customer" c
+                    JOIN "User" u ON u.id = c."userId"
+                    WHERE u.discord = :discord_name
+                """), {"discord_name": interaction.user.name}).fetchone()
+                
+                if not customer_result:
+                    await interaction.response.send_message("❌ 找不到您的客戶記錄", ephemeral=True)
+                    return
+                
+                customer_id = customer_result[0]
+                
+                # 創建多人開團評價記錄
+                review = GroupBookingReview(
+                    groupBookingId=self.group_booking_id,
+                    reviewerId=customer_id,
+                    rating=rating,
+                    comment=str(self.comment) if self.comment else None
+                )
+                s.add(review)
+                s.commit()
+            
+            # 發送到管理員頻道
+            await send_group_rating_to_admin(self.group_booking_id, rating, str(self.comment), interaction.user.name)
+            
+            # 標記用戶已提交評價
+            self.parent_view.submitted_users.add(interaction.user.id)
+            
+            # 確認收到評價
+            await interaction.response.send_message(
+                f"✅ 感謝您的評價！\n"
+                f"評分：{'⭐' * rating}\n"
+                f"評論：{str(self.comment) if self.comment else '無'}",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            print(f"❌ 處理多人開團評價提交失敗: {e}")
+            await interaction.response.send_message("❌ 處理評價時發生錯誤，請稍後再試", ephemeral=True)
+
+async def send_group_rating_to_admin(group_booking_id, rating, comment, reviewer_name):
+    """發送多人開團評價結果到管理員頻道"""
+    try:
+        admin_channel = bot.get_channel(ADMIN_CHANNEL_ID)
+        if not admin_channel:
+            print(f"❌ 找不到管理員頻道 (ID: {ADMIN_CHANNEL_ID})")
+            return
+        
+        # 獲取群組預約資訊
+        with Session() as s:
+            result = s.execute(text("""
+                SELECT gb.title, gb."currentParticipants", gb."maxParticipants"
+                FROM "GroupBooking" gb
+                WHERE gb.id = :group_booking_id
+            """), {"group_booking_id": group_booking_id}).fetchone()
+            
+            if not result:
+                print(f"❌ 找不到群組預約記錄: {group_booking_id}")
+                return
+            
+            title = result[0] or "多人開團"
+            current_participants = result[1]
+            max_participants = result[2]
+        
+        # 創建評價嵌入訊息
+        embed = discord.Embed(
+            title="⭐ 多人開團評價回饋",
+            color=0x00ff00,
+            timestamp=datetime.now(timezone.utc)
+        )
+        
+        embed.add_field(
+            name="🎮 開團標題",
+            value=title,
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👤 評價者",
+            value=reviewer_name,
+            inline=True
+        )
+        
+        embed.add_field(
+            name="⭐ 評分",
+            value="⭐" * rating,
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👥 參與人數",
+            value=f"{current_participants}/{max_participants}",
+            inline=True
+        )
+        
+        if comment:
+            embed.add_field(
+                name="💬 留言",
+                value=comment,
+                inline=False
+            )
+        
+        embed.add_field(
+            name="📋 群組預約ID",
+            value=f"`{group_booking_id}`",
+            inline=True
+        )
+        
+        embed.set_footer(text="PeiPlay 多人開團評價系統")
+        
+        await admin_channel.send(embed=embed)
+        print(f"✅ 多人開團評價已發送到管理員頻道: {reviewer_name} → {title} ({rating}⭐)")
+        
+    except Exception as e:
+        print(f"❌ 發送多人開團評價到管理員頻道失敗: {e}")
 
 async def create_booking_voice_channel(booking_id, customer_discord, partner_discord, start_time, end_time, is_instant_booking=None, discord_delay_minutes=None):
     """為預約創建語音頻道"""
