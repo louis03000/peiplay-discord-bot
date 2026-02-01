@@ -1,0 +1,99 @@
+===========================================
+修復代碼片段 - 請在您的 bot.py 中替換
+===========================================
+
+【修復 1】找到 ManualRatingView 類別，將所有按鈕的 emoji 參數移除
+
+找到這樣的代碼：
+@discord.ui.button(label="⭐ 1星", style=discord.ButtonStyle.secondary, emoji="⭐")
+
+改為：
+@discord.ui.button(label="⭐ 1星", style=discord.ButtonStyle.secondary)
+
+需要修改所有 5 個星等按鈕（1-5星），以及任何身份選擇按鈕。
+
+【修復 2】在 countdown 函數中（約第 4015 行），找到創建 ManualRatingView 的地方
+
+在創建 View 之前，添加從資料庫獲取用戶ID的代碼：
+
+# 從資料庫獲取正確的用戶ID
+with Session() as s:
+    record = s.get(PairingRecord, record_id)
+    if not record:
+        print(f"❌ 找不到配對記錄: {record_id}")
+        if text_channel and not text_channel.deleted:
+            await text_channel.delete()
+        active_voice_channels.pop(vc_id, None)
+        return
+    
+    # 確保從資料庫獲取正確的用戶ID
+    user1_id = record.user1Id
+    user2_id = record.user2Id
+    print(f"🔍 從資料庫獲取用戶ID: user1_id={user1_id}, user2_id={user2_id}")
+
+# 然後創建 View
+view = ManualRatingView(record_id, user1_id, user2_id)
+
+【修復 3】在發送管理員訊息的部分，確保使用正確的用戶ID並檢查評價
+
+找到發送管理員訊息的部分，確保：
+1. 使用從資料庫獲取的 user1_id 和 user2_id
+2. 正確檢查 pending_ratings 和資料庫中的評價
+
+===========================================
+完整的 ManualRatingView 修復版本
+===========================================
+
+class ManualRatingView(discord.ui.View):
+    def __init__(self, record_id, user1_id, user2_id):
+        super().__init__(timeout=600)  # 10 分鐘超時
+        self.record_id = record_id
+        self.user1_id = user1_id
+        self.user2_id = user2_id
+        self.ratings = {}
+        self.submitted_users = set()
+    
+    # 修復：移除 emoji 參數
+    @discord.ui.button(label="⭐ 1星", style=discord.ButtonStyle.secondary, custom_id="rating_1")
+    async def rate_1_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_rating(interaction, 1)
+    
+    @discord.ui.button(label="⭐⭐ 2星", style=discord.ButtonStyle.secondary, custom_id="rating_2")
+    async def rate_2_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_rating(interaction, 2)
+    
+    @discord.ui.button(label="⭐⭐⭐ 3星", style=discord.ButtonStyle.secondary, custom_id="rating_3")
+    async def rate_3_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_rating(interaction, 3)
+    
+    @discord.ui.button(label="⭐⭐⭐⭐ 4星", style=discord.ButtonStyle.secondary, custom_id="rating_4")
+    async def rate_4_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_rating(interaction, 4)
+    
+    @discord.ui.button(label="⭐⭐⭐⭐⭐ 5星", style=discord.ButtonStyle.secondary, custom_id="rating_5")
+    async def rate_5_star(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.handle_rating(interaction, 5)
+    
+    # 如果有身份選擇按鈕，也移除 emoji 參數
+    @discord.ui.button(label="👤 我是顧客", style=discord.ButtonStyle.primary, custom_id="role_customer")
+    async def select_customer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.selected_role = "customer"
+        await interaction.response.send_message("✅ 您已選擇「顧客」身份", ephemeral=True)
+    
+    @discord.ui.button(label="👤 我是夥伴", style=discord.ButtonStyle.primary, custom_id="role_partner")
+    async def select_partner(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.selected_role = "partner"
+        await interaction.response.send_message("✅ 您已選擇「夥伴」身份", ephemeral=True)
+    
+    async def handle_rating(self, interaction: discord.Interaction, rating: int):
+        user_id = interaction.user.id
+        
+        # 檢查是否已經評價過
+        if user_id in self.submitted_users:
+            await interaction.response.send_message("❗ 您已經提交過評價了。", ephemeral=True)
+            return
+        
+        # 打開評價表單
+        modal = RatingModal(self.record_id, rating)
+        await interaction.response.send_modal(modal)
+
