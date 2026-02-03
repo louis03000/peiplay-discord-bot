@@ -2667,34 +2667,40 @@ async def check_new_bookings():
         # 將同步資料庫操作移到線程池，避免阻塞事件循環
         def query_bookings():
             def _query():
+                # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                 with Session() as s:
-                    now = datetime.now(timezone.utc)
-                    five_minutes_from_now = now + timedelta(minutes=5)
-                    query = """
-                        SELECT 
-                            b.id, b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
-                            c.name as customer_name, cu.discord as customer_discord,
-                            p.name as partner_name, pu.discord as partner_discord,
-                            s."startTime", s."endTime"
-                        FROM "Booking" b
-                        JOIN "Schedule" s ON s.id = b."scheduleId"
-                        JOIN "Customer" c ON c.id = b."customerId"
-                        JOIN "User" cu ON cu.id = c."userId"
-                        JOIN "Partner" p ON p.id = s."partnerId"
-                        JOIN "User" pu ON pu.id = p."userId"
-                        WHERE b.status = 'CONFIRMED'
-                        AND b."groupBookingId" IS NULL
-                        AND b."multiPlayerBookingId" IS NULL
-                        AND s."startTime" <= :five_minutes_from_now
-                        AND s."startTime" > :now
-                        AND s."endTime" > :now
-                        AND b."discordTextChannelId" IS NULL
-                    """
-                    result = s.execute(text(query), {
-                        "five_minutes_from_now": five_minutes_from_now,
-                        "now": now
-                    })
-                    return list(result)  # 轉換為列表，避免在線程外訪問結果
+                    try:
+                        now = datetime.now(timezone.utc)
+                        five_minutes_from_now = now + timedelta(minutes=5)
+                        query = """
+                            SELECT 
+                                b.id, b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
+                                c.name as customer_name, cu.discord as customer_discord,
+                                p.name as partner_name, pu.discord as partner_discord,
+                                s."startTime", s."endTime"
+                            FROM "Booking" b
+                            JOIN "Schedule" s ON s.id = b."scheduleId"
+                            JOIN "Customer" c ON c.id = b."customerId"
+                            JOIN "User" cu ON cu.id = c."userId"
+                            JOIN "Partner" p ON p.id = s."partnerId"
+                            JOIN "User" pu ON pu.id = p."userId"
+                            WHERE b.status = 'CONFIRMED'
+                            AND b."groupBookingId" IS NULL
+                            AND b."multiPlayerBookingId" IS NULL
+                            AND s."startTime" <= :five_minutes_from_now
+                            AND s."startTime" > :now
+                            AND s."endTime" > :now
+                            AND b."discordTextChannelId" IS NULL
+                        """
+                        result = s.execute(text(query), {
+                            "five_minutes_from_now": five_minutes_from_now,
+                            "now": now
+                        })
+                        return list(result)  # 轉換為列表，避免在線程外訪問結果
+                    except Exception as e:
+                        # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                        s.rollback()
+                        raise
             
             return safe_db_execute(_query) or []
         
@@ -2709,13 +2715,20 @@ async def check_new_bookings():
                         continue  # 靜默跳過，不輸出日誌
                     
                     # 檢查資料庫中是否已經有文字頻道ID（在線程中執行）
+                    # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                     def check_existing_channel(booking_id):
+                        # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                         with Session() as check_s:
-                            existing_channel = check_s.execute(
-                                text("SELECT \"discordTextChannelId\" FROM \"Booking\" WHERE id = :booking_id"),
-                                {"booking_id": booking_id}
-                            ).fetchone()
-                            return existing_channel[0] if existing_channel and existing_channel[0] else None
+                            try:
+                                existing_channel = check_s.execute(
+                                    text("SELECT \"discordTextChannelId\" FROM \"Booking\" WHERE id = :booking_id"),
+                                    {"booking_id": booking_id}
+                                ).fetchone()
+                                return existing_channel[0] if existing_channel and existing_channel[0] else None
+                            except Exception as e:
+                                # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                check_s.rollback()
+                                raise
                     
                     existing_channel_id = await asyncio.to_thread(check_existing_channel, row.id)
                     if existing_channel_id:
@@ -2769,16 +2782,22 @@ async def check_new_bookings():
 
                         # 建立成功後，更新資料庫並標記 processed
                         try:
+                            # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                             with Session() as update_s:
-                                update_s.execute(
-                                    text("""
-                                        UPDATE "Booking"
-                                        SET "discordTextChannelId" = :channel_id
-                                        WHERE id = :booking_id
-                                    """),
-                                    {"channel_id": str(text_channel.id), "booking_id": row.id}
-                                )
-                                update_s.commit()
+                                try:
+                                    update_s.execute(
+                                        text("""
+                                            UPDATE "Booking"
+                                            SET "discordTextChannelId" = :channel_id
+                                            WHERE id = :booking_id
+                                        """),
+                                        {"channel_id": str(text_channel.id), "booking_id": row.id}
+                                    )
+                                    update_s.commit()
+                                except Exception as e:
+                                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                    update_s.rollback()
+                                    raise
                             processed_text_channels.add(row.id)
                             print(f"✅ 預約 {row.id} 已建立文字頻道並寫回資料庫")
                             continue
@@ -2808,31 +2827,38 @@ async def auto_close_available_now():
         thirty_minutes_ago = datetime.now(timezone.utc) - timedelta(minutes=30)
         
         # 將同步資料庫操作移到線程池，避免阻塞事件循環
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_and_update_expired():
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
             with Session() as s:
-                # 查詢開啟「現在有空」超過30分鐘的夥伴
-                expired_query = """
-                SELECT id, name, "availableNowSince"
-                FROM "Partner"
-                WHERE "isAvailableNow" = true
-                AND "availableNowSince" < :thirty_minutes_ago
-                """
-                
-                expired_partners = s.execute(text(expired_query), {"thirty_minutes_ago": thirty_minutes_ago}).fetchall()
-                
-                if expired_partners:
-                    # 批量關閉過期的「現在有空」狀態
-                    update_query = """
-                    UPDATE "Partner"
-                    SET "isAvailableNow" = false, "availableNowSince" = NULL
+                try:
+                    # 查詢開啟「現在有空」超過30分鐘的夥伴
+                    expired_query = """
+                    SELECT id, name, "availableNowSince"
+                    FROM "Partner"
                     WHERE "isAvailableNow" = true
                     AND "availableNowSince" < :thirty_minutes_ago
                     """
                     
-                    result = s.execute(text(update_query), {"thirty_minutes_ago": thirty_minutes_ago})
-                    s.commit()
-                    return len(expired_partners)
-                return 0
+                    expired_partners = s.execute(text(expired_query), {"thirty_minutes_ago": thirty_minutes_ago}).fetchall()
+                    
+                    if expired_partners:
+                        # 批量關閉過期的「現在有空」狀態
+                        update_query = """
+                        UPDATE "Partner"
+                        SET "isAvailableNow" = false, "availableNowSince" = NULL
+                        WHERE "isAvailableNow" = true
+                        AND "availableNowSince" < :thirty_minutes_ago
+                        """
+                        
+                        result = s.execute(text(update_query), {"thirty_minutes_ago": thirty_minutes_ago})
+                        s.commit()
+                        return len(expired_partners)
+                    return 0
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    s.rollback()
+                    raise
         
         # 在線程池中執行資料庫操作
         expired_count = await asyncio.to_thread(query_and_update_expired)
@@ -2852,32 +2878,39 @@ async def check_instant_bookings_for_text_channel():
     
     try:
         # 將同步資料庫操作移到線程池，避免阻塞事件循環
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_instant_bookings():
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
             with Session() as s:
-                now = datetime.now(timezone.utc)
-                query = """
-                    SELECT 
-                        b.id, b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
-                        c.name as customer_name,
-                        COALESCE(b."paymentInfo"->>'customerDiscord', cu.discord) as customer_discord,
-                        p.name as partner_name, pu.discord as partner_discord,
-                        s."startTime", s."endTime",
-                        b."paymentInfo"->>'discordDelayMinutes' as discord_delay_minutes,
-                        b."serviceType" as service_type,
-                        b."paymentInfo"->>'isChatOnly' as is_chat_only
-                    FROM "Booking" b
-                    JOIN "Schedule" s ON s.id = b."scheduleId"
-                    JOIN "Customer" c ON c.id = b."customerId"
-                    JOIN "User" cu ON cu.id = c."userId"
-                    JOIN "Partner" p ON p.id = s."partnerId"
-                    JOIN "User" pu ON pu.id = p."userId"
-                    WHERE b.status = 'CONFIRMED'
-                    AND b."paymentInfo"->>'isInstantBooking' = 'true'
-                    AND b."discordEarlyTextChannelId" IS NULL
-                    AND s."startTime" > :now
-                """
-                result = s.execute(text(query), {"now": now})
-                return result.fetchall()
+                try:
+                    now = datetime.now(timezone.utc)
+                    query = """
+                        SELECT 
+                            b.id, b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
+                            c.name as customer_name,
+                            COALESCE(b."paymentInfo"->>'customerDiscord', cu.discord) as customer_discord,
+                            p.name as partner_name, pu.discord as partner_discord,
+                            s."startTime", s."endTime",
+                            b."paymentInfo"->>'discordDelayMinutes' as discord_delay_minutes,
+                            b."serviceType" as service_type,
+                            b."paymentInfo"->>'isChatOnly' as is_chat_only
+                        FROM "Booking" b
+                        JOIN "Schedule" s ON s.id = b."scheduleId"
+                        JOIN "Customer" c ON c.id = b."customerId"
+                        JOIN "User" cu ON cu.id = c."userId"
+                        JOIN "Partner" p ON p.id = s."partnerId"
+                        JOIN "User" pu ON pu.id = p."userId"
+                        WHERE b.status = 'CONFIRMED'
+                        AND b."paymentInfo"->>'isInstantBooking' = 'true'
+                        AND b."discordEarlyTextChannelId" IS NULL
+                        AND s."startTime" > :now
+                    """
+                    result = s.execute(text(query), {"now": now})
+                    return result.fetchall()
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    s.rollback()
+                    raise
         
         # 添加連接重試機制
         max_retries = 3
@@ -3867,35 +3900,42 @@ async def auto_cancel_multiplayer_bookings():
         cancel_window_start = now
         cancel_window_end = now + timedelta(minutes=5)
         
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_bookings_to_cancel():
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
             with Session() as s:
-                query = """
-                    SELECT 
-                        mpb.id as multi_player_booking_id,
-                        mpb."startTime",
-                        mpb."endTime",
-                        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) as confirmed_count,
-                        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('REJECTED', 'PARTNER_REJECTED')) as rejected_count,
-                        COUNT(DISTINCT b.id) as total_count
-                    FROM "MultiPlayerBooking" mpb
-                    JOIN "Booking" b ON b."multiPlayerBookingId" = mpb.id
-                    WHERE mpb.status IN ('ACTIVE', 'PENDING')
-                    AND mpb."startTime" >= :window_start
-                    AND mpb."startTime" <= :window_end
-                    GROUP BY mpb.id, mpb."startTime", mpb."endTime"
-                    HAVING 
-                        -- 沒有任何夥伴確認，且所有夥伴都拒絕或沒有回應
-                        (COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) = 0
-                        AND COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('REJECTED', 'PARTNER_REJECTED')) = COUNT(DISTINCT b.id))
-                        OR
-                        -- 或者所有夥伴都拒絕
-                        (COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('REJECTED', 'PARTNER_REJECTED')) = COUNT(DISTINCT b.id))
-                """
-                result = s.execute(text(query), {
-                    "window_start": cancel_window_start,
-                    "window_end": cancel_window_end
-                })
-                return list(result)
+                try:
+                    query = """
+                        SELECT 
+                            mpb.id as multi_player_booking_id,
+                            mpb."startTime",
+                            mpb."endTime",
+                            COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) as confirmed_count,
+                            COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('REJECTED', 'PARTNER_REJECTED')) as rejected_count,
+                            COUNT(DISTINCT b.id) as total_count
+                        FROM "MultiPlayerBooking" mpb
+                        JOIN "Booking" b ON b."multiPlayerBookingId" = mpb.id
+                        WHERE mpb.status IN ('ACTIVE', 'PENDING')
+                        AND mpb."startTime" >= :window_start
+                        AND mpb."startTime" <= :window_end
+                        GROUP BY mpb.id, mpb."startTime", mpb."endTime"
+                        HAVING 
+                            -- 沒有任何夥伴確認，且所有夥伴都拒絕或沒有回應
+                            (COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) = 0
+                            AND COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('REJECTED', 'PARTNER_REJECTED')) = COUNT(DISTINCT b.id))
+                            OR
+                            -- 或者所有夥伴都拒絕
+                            (COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('REJECTED', 'PARTNER_REJECTED')) = COUNT(DISTINCT b.id))
+                    """
+                    result = s.execute(text(query), {
+                        "window_start": cancel_window_start,
+                        "window_end": cancel_window_end
+                    })
+                    return list(result)
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    s.rollback()
+                    raise
         
         try:
             bookings_to_cancel = await asyncio.to_thread(query_bookings_to_cancel)
@@ -3905,24 +3945,31 @@ async def auto_cancel_multiplayer_bookings():
                     multi_player_booking_id = row.multi_player_booking_id
                     
                     # 取消所有相關的 Booking
+                    # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                     def cancel_booking():
+                        # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                         with Session() as s:
-                            # 更新所有 Booking 狀態為 CANCELLED
-                            s.execute(text("""
-                                UPDATE "Booking"
-                                SET status = 'CANCELLED'
-                                WHERE "multiPlayerBookingId" = :multi_player_booking_id
-                                AND status NOT IN ('CANCELLED', 'REJECTED', 'PARTNER_REJECTED')
-                            """), {"multi_player_booking_id": multi_player_booking_id})
-                            
-                            # 更新 MultiPlayerBooking 狀態為 CANCELLED
-                            s.execute(text("""
-                                UPDATE "MultiPlayerBooking"
-                                SET status = 'CANCELLED'
-                                WHERE id = :multi_player_booking_id
-                            """), {"multi_player_booking_id": multi_player_booking_id})
-                            
-                            s.commit()
+                            try:
+                                # 更新所有 Booking 狀態為 CANCELLED
+                                s.execute(text("""
+                                    UPDATE "Booking"
+                                    SET status = 'CANCELLED'
+                                    WHERE "multiPlayerBookingId" = :multi_player_booking_id
+                                    AND status NOT IN ('CANCELLED', 'REJECTED', 'PARTNER_REJECTED')
+                                """), {"multi_player_booking_id": multi_player_booking_id})
+                                
+                                # 更新 MultiPlayerBooking 狀態為 CANCELLED
+                                s.execute(text("""
+                                    UPDATE "MultiPlayerBooking"
+                                    SET status = 'CANCELLED'
+                                    WHERE id = :multi_player_booking_id
+                                """), {"multi_player_booking_id": multi_player_booking_id})
+                                
+                                s.commit()
+                            except Exception as e:
+                                # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                s.rollback()
+                                raise
                     
                     await asyncio.to_thread(cancel_booking)
                     print(f"✅ 自動取消多人陪玩訂單: {multi_player_booking_id} (所有夥伴都拒絕或沒有回應)")
@@ -4293,27 +4340,34 @@ async def check_booking_timeouts():
     
     try:
         # 將同步資料庫操作移到線程池，避免阻塞事件循環
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_timeout_bookings():
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
             with Session() as s:
-                now = datetime.now(timezone.utc)
-                
-                # 查詢超時的等待夥伴回覆的預約
-                timeout_query = """
-                    SELECT 
-                        b.id, b.status, b."partnerResponseDeadline",
-                        c.name as customer_name, p.name as partner_name,
-                        p.id as partner_id
-                    FROM "Booking" b
-                    JOIN "Schedule" sch ON sch.id = b."scheduleId"
-                    JOIN "Customer" c ON c.id = b."customerId"
-                    JOIN "Partner" p ON p.id = sch."partnerId"
-                    WHERE b.status = 'PAID_WAITING_PARTNER_CONFIRMATION'
-                    AND b."isWaitingPartnerResponse" = true
-                    AND b."partnerResponseDeadline" < :now
-                """
-                
-                timeout_bookings = s.execute(text(timeout_query), {"now": now}).fetchall()
-                return list(timeout_bookings)
+                try:
+                    now = datetime.now(timezone.utc)
+                    
+                    # 查詢超時的等待夥伴回覆的預約
+                    timeout_query = """
+                        SELECT 
+                            b.id, b.status, b."partnerResponseDeadline",
+                            c.name as customer_name, p.name as partner_name,
+                            p.id as partner_id
+                        FROM "Booking" b
+                        JOIN "Schedule" sch ON sch.id = b."scheduleId"
+                        JOIN "Customer" c ON c.id = b."customerId"
+                        JOIN "Partner" p ON p.id = sch."partnerId"
+                        WHERE b.status = 'PAID_WAITING_PARTNER_CONFIRMATION'
+                        AND b."isWaitingPartnerResponse" = true
+                        AND b."partnerResponseDeadline" < :now
+                    """
+                    
+                    timeout_bookings = s.execute(text(timeout_query), {"now": now}).fetchall()
+                    return list(timeout_bookings)
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    s.rollback()
+                    raise
         
         # 在線程池中執行資料庫查詢
         timeout_bookings = await asyncio.to_thread(query_timeout_bookings)
@@ -4330,31 +4384,38 @@ async def check_booking_timeouts():
                     
                     # 更新預約狀態為取消（在線程中執行）
                     async def update_booking_cancelled(booking_id, partner_id):
+                        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                         def update():
+                            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                             with Session() as s:
-                                s.execute(
-                                    text("""
-                                        UPDATE "Booking" 
-                                        SET status = 'CANCELLED', 
-                                            "rejectReason" = '夥伴未在10分鐘內回覆，自動取消',
-                                            "isWaitingPartnerResponse" = false,
-                                            "partnerResponseDeadline" = null
-                                        WHERE id = :booking_id
-                                    """),
-                                    {"booking_id": booking_id}
-                                )
-                                
-                                # 更新夥伴的未回覆計數
-                                s.execute(
-                                    text("""
-                                        UPDATE "Partner" 
-                                        SET "noResponseCount" = "noResponseCount" + 1
-                                        WHERE id = :partner_id
-                                    """),
-                                    {"partner_id": partner_id}
-                                )
-                                
-                                s.commit()
+                                try:
+                                    s.execute(
+                                        text("""
+                                            UPDATE "Booking" 
+                                            SET status = 'CANCELLED', 
+                                                "rejectReason" = '夥伴未在10分鐘內回覆，自動取消',
+                                                "isWaitingPartnerResponse" = false,
+                                                "partnerResponseDeadline" = null
+                                            WHERE id = :booking_id
+                                        """),
+                                        {"booking_id": booking_id}
+                                    )
+                                    
+                                    # 更新夥伴的未回覆計數
+                                    s.execute(
+                                        text("""
+                                            UPDATE "Partner" 
+                                            SET "noResponseCount" = "noResponseCount" + 1
+                                            WHERE id = :partner_id
+                                        """),
+                                        {"partner_id": partner_id}
+                                    )
+                                    
+                                    s.commit()
+                                except Exception as e:
+                                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                    s.rollback()
+                                    raise
                         await asyncio.to_thread(update)
                     
                     await update_booking_cancelled(booking_id, partner_id)
@@ -4363,13 +4424,20 @@ async def check_booking_timeouts():
                     
                     # 檢查是否需要通知管理員（累積3次）
                     async def check_partner_no_response(partner_id, partner_name):
+                        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                         def query():
+                            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                             with Session() as s:
-                                partner_result = s.execute(
-                                    text("SELECT \"noResponseCount\" FROM \"Partner\" WHERE id = :partner_id"),
-                                    {"partner_id": partner_id}
-                                ).fetchone()
-                                return partner_result[0] if partner_result else 0
+                                try:
+                                    partner_result = s.execute(
+                                        text("SELECT \"noResponseCount\" FROM \"Partner\" WHERE id = :partner_id"),
+                                        {"partner_id": partner_id}
+                                    ).fetchone()
+                                    return partner_result[0] if partner_result else 0
+                                except Exception as e:
+                                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                    s.rollback()
+                                    raise
                         
                         no_response_count = await asyncio.to_thread(query)
                         
@@ -4399,30 +4467,37 @@ async def check_missing_ratings():
     await bot.wait_until_ready()
     
     try:
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def _check():
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
             with Session() as s:
-                # 查找已結束但沒有評價記錄的預約
-                now = datetime.now(timezone.utc)
-                
-                # 查找所有已結束的預約（放寬時間條件）
-                missing_ratings = s.execute(text("""
-                    SELECT 
-                        b.id, c.name as customer_name, p.name as partner_name,
-                        s."endTime"
-                    FROM "Booking" b
-                    JOIN "Schedule" s ON s.id = b."scheduleId"
-                    JOIN "Customer" c ON c.id = b."customerId"
-                    JOIN "Partner" p ON p.id = s."partnerId"
-                    WHERE b.status = 'CONFIRMED'
-                    AND s."endTime" < :now
-                    AND s."endTime" >= :recent_time
-                    AND (b."discordVoiceChannelId" IS NOT NULL OR b."discordTextChannelId" IS NOT NULL)
-                """), {
-                    "now": now,
-                    "recent_time": now - timedelta(hours=48)  # 檢查最近48小時的預約
-                }).fetchall()
-                
-                return missing_ratings
+                try:
+                    # 查找已結束但沒有評價記錄的預約
+                    now = datetime.now(timezone.utc)
+                    
+                    # 查找所有已結束的預約（放寬時間條件）
+                    missing_ratings = s.execute(text("""
+                        SELECT 
+                            b.id, c.name as customer_name, p.name as partner_name,
+                            s."endTime"
+                        FROM "Booking" b
+                        JOIN "Schedule" s ON s.id = b."scheduleId"
+                        JOIN "Customer" c ON c.id = b."customerId"
+                        JOIN "Partner" p ON p.id = s."partnerId"
+                        WHERE b.status = 'CONFIRMED'
+                        AND s."endTime" < :now
+                        AND s."endTime" >= :recent_time
+                        AND (b."discordVoiceChannelId" IS NOT NULL OR b."discordTextChannelId" IS NOT NULL)
+                    """), {
+                        "now": now,
+                        "recent_time": now - timedelta(hours=48)  # 檢查最近48小時的預約
+                    }).fetchall()
+                    
+                    return missing_ratings
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    s.rollback()
+                    raise
         
         missing_ratings = await asyncio.to_thread(lambda: safe_db_execute(_check))
         if missing_ratings is None:
@@ -5039,92 +5114,101 @@ async def check_bookings():
         """
         
         # 將同步資料庫操作移到線程池，避免阻塞事件循環
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_all_bookings():
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
             with Session() as s:
-                # 查詢一般預約（processed 欄位如果不存在，b.processed IS NULL 會返回 true，所以查詢仍能正常工作）
                 try:
-                    result = s.execute(text(query), {"start_time_1": window_start, "start_time_2": window_end, "current_time": now})
-                except Exception as query_error:
-                    # 如果查詢失敗（可能是 processed 欄位不存在），移除 processed 條件重試
-                    if "processed" in str(query_error).lower():
-                        query_without_processed = query.replace("AND (b.processed IS NULL OR b.processed = false)", "")
-                        result = s.execute(text(query_without_processed), {"start_time_1": window_start, "start_time_2": window_end, "current_time": now})
-                    else:
-                        raise
-                
-                # 查詢即時預約
-                instant_result = s.execute(text(instant_query), {"instant_start_time_1": instant_window_start, "instant_start_time_2": instant_window_end, "current_time": now})
-                
-                # 查詢群組預約（通過 groupBookingId 判斷）
-                group_query = """
-                    SELECT 
-                        b."groupBookingId", b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
-                        c.name as customer_name, cu.discord as customer_discord,
-                        p.name as partner_name, pu.discord as partner_discord,
-                        s."startTime", s."endTime"
-                    FROM "Booking" b
-                    JOIN "Schedule" s ON s.id = b."scheduleId"
-                    JOIN "Customer" c ON c.id = b."customerId"
-                    JOIN "User" cu ON cu.id = c."userId"
-                    JOIN "Partner" p ON p.id = s."partnerId"
-                    JOIN "User" pu ON pu.id = p."userId"
-                    WHERE b.status = 'CONFIRMED'
-                    AND b."groupBookingId" IS NOT NULL
-                    AND s."startTime" >= :start_time_1
-                    AND s."startTime" <= :start_time_2
-                    AND s."endTime" > :current_time
-                    AND b."discordVoiceChannelId" IS NULL
-                """
-                
-                group_result = s.execute(text(group_query), {"start_time_1": window_start, "start_time_2": window_end, "current_time": now})
-                
-                # ✅ 查詢多人陪玩預約（開始前3-5分鐘創建語音頻道）
-                # 🔥 修改：必須所有夥伴都 CONFIRMED，且沒有 REJECTED 的夥伴
-                # ✅ 時間窗口：開始前5分鐘到開始前3分鐘（確保在開始前3-5分鐘創建）
-                multi_player_window_start = now + timedelta(minutes=3)  # 開始前3分鐘
-                multi_player_window_end = now + timedelta(minutes=5)    # 開始前5分鐘
-                
-                multi_player_query = """
-                    SELECT 
-                        mpb.id as multi_player_booking_id,
-                        mpb."customerId",
-                        mpb."startTime",
-                        mpb."endTime",
-                        c.name as customer_name,
-                        cu.discord as customer_discord,
-                        array_agg(DISTINCT p.name) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) as partner_names,
-                        array_agg(DISTINCT pu.discord) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED') AND pu.discord IS NOT NULL) as partner_discords,
-                        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) as confirmed_count,
-                        COUNT(DISTINCT b.id) as total_count
-                    FROM "MultiPlayerBooking" mpb
-                    JOIN "Booking" b ON b."multiPlayerBookingId" = mpb.id
-                    JOIN "Schedule" s ON s.id = b."scheduleId"
-                    JOIN "Customer" c ON c.id = mpb."customerId"
-                    JOIN "User" cu ON cu.id = c."userId"
-                    JOIN "Partner" p ON p.id = s."partnerId"
-                    JOIN "User" pu ON pu.id = p."userId"
-                    WHERE mpb.status IN ('ACTIVE', 'PENDING')
-                    AND mpb."startTime" >= :start_time_1
-                    AND mpb."startTime" <= :start_time_2
-                    AND mpb."endTime" > :current_time
-                    AND mpb."discordVoiceChannelId" IS NULL
-                    GROUP BY mpb.id, mpb."customerId", mpb."startTime", mpb."endTime", c.name, cu.discord
-                    HAVING 
-                        -- 必須所有夥伴都 CONFIRMED 或 PARTNER_ACCEPTED（沒有 PENDING 或 REJECTED）
-                        COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) = COUNT(DISTINCT b.id)
-                        AND COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('REJECTED', 'PARTNER_REJECTED')) = 0
-                        AND COUNT(DISTINCT pu.discord) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED') AND pu.discord IS NOT NULL) > 0
-                """
-                
-                multi_player_result = s.execute(text(multi_player_query), {"start_time_1": multi_player_window_start, "start_time_2": multi_player_window_end, "current_time": now})
-                
-                # 轉換為列表，避免在線程外訪問結果
-                result_list = list(result)
-                instant_result_list = list(instant_result)
-                group_result_list = list(group_result)
-                multi_player_result_list = list(multi_player_result)
-                
-                return result_list, instant_result_list, group_result_list, multi_player_result_list
+                    # 查詢一般預約（processed 欄位如果不存在，b.processed IS NULL 會返回 true，所以查詢仍能正常工作）
+                    try:
+                        result = s.execute(text(query), {"start_time_1": window_start, "start_time_2": window_end, "current_time": now})
+                    except Exception as query_error:
+                        # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                        s.rollback()
+                        # 如果查詢失敗（可能是 processed 欄位不存在），移除 processed 條件重試
+                        if "processed" in str(query_error).lower():
+                            query_without_processed = query.replace("AND (b.processed IS NULL OR b.processed = false)", "")
+                            result = s.execute(text(query_without_processed), {"start_time_1": window_start, "start_time_2": window_end, "current_time": now})
+                        else:
+                            raise
+                    
+                    # 查詢即時預約
+                    instant_result = s.execute(text(instant_query), {"instant_start_time_1": instant_window_start, "instant_start_time_2": instant_window_end, "current_time": now})
+                    
+                    # 查詢群組預約（通過 groupBookingId 判斷）
+                    group_query = """
+                        SELECT 
+                            b."groupBookingId", b."customerId", b."scheduleId", b.status, b."createdAt", b."updatedAt",
+                            c.name as customer_name, cu.discord as customer_discord,
+                            p.name as partner_name, pu.discord as partner_discord,
+                            s."startTime", s."endTime"
+                        FROM "Booking" b
+                        JOIN "Schedule" s ON s.id = b."scheduleId"
+                        JOIN "Customer" c ON c.id = b."customerId"
+                        JOIN "User" cu ON cu.id = c."userId"
+                        JOIN "Partner" p ON p.id = s."partnerId"
+                        JOIN "User" pu ON pu.id = p."userId"
+                        WHERE b.status = 'CONFIRMED'
+                        AND b."groupBookingId" IS NOT NULL
+                        AND s."startTime" >= :start_time_1
+                        AND s."startTime" <= :start_time_2
+                        AND s."endTime" > :current_time
+                        AND b."discordVoiceChannelId" IS NULL
+                    """
+                    
+                    group_result = s.execute(text(group_query), {"start_time_1": window_start, "start_time_2": window_end, "current_time": now})
+                    
+                    # ✅ 查詢多人陪玩預約（開始前3-5分鐘創建語音頻道）
+                    # 🔥 修改：必須所有夥伴都 CONFIRMED，且沒有 REJECTED 的夥伴
+                    # ✅ 時間窗口：開始前5分鐘到開始前3分鐘（確保在開始前3-5分鐘創建）
+                    multi_player_window_start = now + timedelta(minutes=3)  # 開始前3分鐘
+                    multi_player_window_end = now + timedelta(minutes=5)    # 開始前5分鐘
+                    
+                    multi_player_query = """
+                        SELECT 
+                            mpb.id as multi_player_booking_id,
+                            mpb."customerId",
+                            mpb."startTime",
+                            mpb."endTime",
+                            c.name as customer_name,
+                            cu.discord as customer_discord,
+                            array_agg(DISTINCT p.name) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) as partner_names,
+                            array_agg(DISTINCT pu.discord) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED') AND pu.discord IS NOT NULL) as partner_discords,
+                            COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) as confirmed_count,
+                            COUNT(DISTINCT b.id) as total_count
+                        FROM "MultiPlayerBooking" mpb
+                        JOIN "Booking" b ON b."multiPlayerBookingId" = mpb.id
+                        JOIN "Schedule" s ON s.id = b."scheduleId"
+                        JOIN "Customer" c ON c.id = mpb."customerId"
+                        JOIN "User" cu ON cu.id = c."userId"
+                        JOIN "Partner" p ON p.id = s."partnerId"
+                        JOIN "User" pu ON pu.id = p."userId"
+                        WHERE mpb.status IN ('ACTIVE', 'PENDING')
+                        AND mpb."startTime" >= :start_time_1
+                        AND mpb."startTime" <= :start_time_2
+                        AND mpb."endTime" > :current_time
+                        AND mpb."discordVoiceChannelId" IS NULL
+                        GROUP BY mpb.id, mpb."customerId", mpb."startTime", mpb."endTime", c.name, cu.discord
+                        HAVING 
+                            -- 必須所有夥伴都 CONFIRMED 或 PARTNER_ACCEPTED（沒有 PENDING 或 REJECTED）
+                            COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED')) = COUNT(DISTINCT b.id)
+                            AND COUNT(DISTINCT b.id) FILTER (WHERE b.status IN ('REJECTED', 'PARTNER_REJECTED')) = 0
+                            AND COUNT(DISTINCT pu.discord) FILTER (WHERE b.status IN ('CONFIRMED', 'PARTNER_ACCEPTED') AND pu.discord IS NOT NULL) > 0
+                    """
+                    
+                    multi_player_result = s.execute(text(multi_player_query), {"start_time_1": multi_player_window_start, "start_time_2": multi_player_window_end, "current_time": now})
+                    
+                    # 轉換為列表，避免在線程外訪問結果
+                    result_list = list(result)
+                    instant_result_list = list(instant_result)
+                    group_result_list = list(group_result)
+                    multi_player_result_list = list(multi_player_result)
+                    
+                    return result_list, instant_result_list, group_result_list, multi_player_result_list
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    s.rollback()
+                    raise
         
         try:
             # 在線程池中執行資料庫查詢
@@ -5306,25 +5390,39 @@ async def check_bookings():
                     # ✅ 額外檢查：如果 booking.id 是群組預約或多人陪玩 ID，也應該跳過一般預約邏輯
                     # 檢查是否是群組預約（通過 groupBookingId）
                     if not is_group_booking:
+                        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                         def check_is_group_booking_by_id(booking_id):
+                            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                             with Session() as s:
-                                # 檢查 GroupBooking 表中是否有這個 ID
-                                result = s.execute(text("""
-                                    SELECT id FROM "GroupBooking" WHERE id = :booking_id
-                                """), {"booking_id": booking_id}).fetchone()
-                                return result is not None
+                                try:
+                                    # 檢查 GroupBooking 表中是否有這個 ID
+                                    result = s.execute(text("""
+                                        SELECT id FROM "GroupBooking" WHERE id = :booking_id
+                                    """), {"booking_id": booking_id}).fetchone()
+                                    return result is not None
+                                except Exception as e:
+                                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                    s.rollback()
+                                    raise
                         
                         is_group_booking = await asyncio.to_thread(check_is_group_booking_by_id, booking.id)
                     
                     # 檢查是否是多人陪玩（通過 multiPlayerBookingId）
                     if not is_multi_player:
+                        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                         def check_is_multiplayer_by_id(booking_id):
+                            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                             with Session() as s:
-                                # 檢查 MultiPlayerBooking 表中是否有這個 ID
-                                result = s.execute(text("""
-                                    SELECT id FROM "MultiPlayerBooking" WHERE id = :booking_id
-                                """), {"booking_id": booking_id}).fetchone()
-                                return result is not None
+                                try:
+                                    # 檢查 MultiPlayerBooking 表中是否有這個 ID
+                                    result = s.execute(text("""
+                                        SELECT id FROM "MultiPlayerBooking" WHERE id = :booking_id
+                                    """), {"booking_id": booking_id}).fetchone()
+                                    return result is not None
+                                except Exception as e:
+                                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                    s.rollback()
+                                    raise
                         
                         is_multi_player = await asyncio.to_thread(check_is_multiplayer_by_id, booking.id)
                     
@@ -5334,46 +5432,53 @@ async def check_bookings():
                         
                         # 🔥 檢查是否有連續時段的預約已經有頻道（相同顧客和夥伴）
                         # 如果有，就延長現有頻道而不是創建新頻道
+                        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                         def check_consecutive_booking():
+                            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                             with Session() as s:
-                                # 獲取當前預約的夥伴 ID
-                                partner_id_query = """
-                                    SELECT s."partnerId"
-                                    FROM "Booking" b
-                                    JOIN "Schedule" s ON s.id = b."scheduleId"
-                                    WHERE b.id = :booking_id
-                                """
-                                partner_result = s.execute(text(partner_id_query), {"booking_id": booking.id})
-                                partner_row = partner_result.fetchone()
-                                if not partner_row:
-                                    return None
-                                
-                                partner_id = partner_row[0]
-                                
-                                # 查詢相同顧客和夥伴的連續時段預約（已確認且有頻道）
-                                # 連續時段：前一個預約的結束時間 = 當前預約的開始時間
-                                query = """
-                                    SELECT 
-                                        b.id, b."discordTextChannelId", b."discordVoiceChannelId",
-                                        s."startTime", s."endTime"
-                                    FROM "Booking" b
-                                    JOIN "Schedule" s ON s.id = b."scheduleId"
-                                    WHERE b."customerId" = :customer_id
-                                    AND s."partnerId" = :partner_id
-                                    AND b.status = 'CONFIRMED'
-                                    AND b.id != :current_booking_id
-                                    AND (b."discordTextChannelId" IS NOT NULL OR b."discordVoiceChannelId" IS NOT NULL)
-                                    AND s."endTime" = :current_start_time
-                                    ORDER BY s."endTime" DESC
-                                    LIMIT 1
-                                """
-                                result = s.execute(text(query), {
-                                    "customer_id": booking.customerId,
-                                    "partner_id": partner_id,
-                                    "current_booking_id": booking.id,
-                                    "current_start_time": booking.schedule.startTime
-                                })
-                                return result.fetchone()
+                                try:
+                                    # 獲取當前預約的夥伴 ID
+                                    partner_id_query = """
+                                        SELECT s."partnerId"
+                                        FROM "Booking" b
+                                        JOIN "Schedule" s ON s.id = b."scheduleId"
+                                        WHERE b.id = :booking_id
+                                    """
+                                    partner_result = s.execute(text(partner_id_query), {"booking_id": booking.id})
+                                    partner_row = partner_result.fetchone()
+                                    if not partner_row:
+                                        return None
+                                    
+                                    partner_id = partner_row[0]
+                                    
+                                    # 查詢相同顧客和夥伴的連續時段預約（已確認且有頻道）
+                                    # 連續時段：前一個預約的結束時間 = 當前預約的開始時間
+                                    query = """
+                                        SELECT 
+                                            b.id, b."discordTextChannelId", b."discordVoiceChannelId",
+                                            s."startTime", s."endTime"
+                                        FROM "Booking" b
+                                        JOIN "Schedule" s ON s.id = b."scheduleId"
+                                        WHERE b."customerId" = :customer_id
+                                        AND s."partnerId" = :partner_id
+                                        AND b.status = 'CONFIRMED'
+                                        AND b.id != :current_booking_id
+                                        AND (b."discordTextChannelId" IS NOT NULL OR b."discordVoiceChannelId" IS NOT NULL)
+                                        AND s."endTime" = :current_start_time
+                                        ORDER BY s."endTime" DESC
+                                        LIMIT 1
+                                    """
+                                    result = s.execute(text(query), {
+                                        "customer_id": booking.customerId,
+                                        "partner_id": partner_id,
+                                        "current_booking_id": booking.id,
+                                        "current_start_time": booking.schedule.startTime
+                                    })
+                                    return result.fetchone()
+                                except Exception as e:
+                                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                    s.rollback()
+                                    raise
                         
                         consecutive_booking = await asyncio.to_thread(check_consecutive_booking)
                         
@@ -5383,39 +5488,46 @@ async def check_bookings():
                                 print(f"🔄 發現連續時段預約，延長現有頻道: {consecutive_booking.id} -> {booking.id}")
                                 
                                 # 更新連續預約的結束時間為當前預約的結束時間
+                                # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
                                 def extend_booking_time():
+                                    # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
                                     with Session() as s:
-                                        # 更新 Schedule 的結束時間
-                                        s.execute(text("""
-                                            UPDATE "Schedule"
-                                            SET "endTime" = :new_end_time
-                                            WHERE id = (
-                                                SELECT "scheduleId" FROM "Booking" WHERE id = :consecutive_booking_id
-                                            )
-                                        """), {
-                                            "new_end_time": booking.schedule.endTime,
-                                            "consecutive_booking_id": consecutive_booking.id
-                                        })
-                                        
-                                        # 將當前預約的頻道 ID 指向連續預約的頻道
-                                        update_data = {}
-                                        if consecutive_booking.discordTextChannelId:
-                                            update_data['discordTextChannelId'] = consecutive_booking.discordTextChannelId
-                                        if consecutive_booking.discordVoiceChannelId:
-                                            update_data['discordVoiceChannelId'] = consecutive_booking.discordVoiceChannelId
-                                        
-                                        if update_data:
-                                            set_clause = ", ".join([f'"{k}" = :{k}' for k in update_data.keys()])
-                                            s.execute(text(f"""
-                                                UPDATE "Booking"
-                                                SET {set_clause}
-                                                WHERE id = :current_booking_id
+                                        try:
+                                            # 更新 Schedule 的結束時間
+                                            s.execute(text("""
+                                                UPDATE "Schedule"
+                                                SET "endTime" = :new_end_time
+                                                WHERE id = (
+                                                    SELECT "scheduleId" FROM "Booking" WHERE id = :consecutive_booking_id
+                                                )
                                             """), {
-                                                **update_data,
-                                                "current_booking_id": booking.id
+                                                "new_end_time": booking.schedule.endTime,
+                                                "consecutive_booking_id": consecutive_booking.id
                                             })
-                                        
-                                        s.commit()
+                                            
+                                            # 將當前預約的頻道 ID 指向連續預約的頻道
+                                            update_data = {}
+                                            if consecutive_booking.discordTextChannelId:
+                                                update_data['discordTextChannelId'] = consecutive_booking.discordTextChannelId
+                                            if consecutive_booking.discordVoiceChannelId:
+                                                update_data['discordVoiceChannelId'] = consecutive_booking.discordVoiceChannelId
+                                            
+                                            if update_data:
+                                                set_clause = ", ".join([f'"{k}" = :{k}' for k in update_data.keys()])
+                                                s.execute(text(f"""
+                                                    UPDATE "Booking"
+                                                    SET {set_clause}
+                                                    WHERE id = :current_booking_id
+                                                """), {
+                                                    **update_data,
+                                                    "current_booking_id": booking.id
+                                                })
+                                            
+                                            s.commit()
+                                        except Exception as e:
+                                            # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                                            s.rollback()
+                                            raise
                                 
                                 await asyncio.to_thread(extend_booking_time)
                                 
@@ -6220,106 +6332,110 @@ async def check_instant_booking_timing():
         now = datetime.now(timezone.utc)
         
         # 將同步資料庫操作移到線程池，避免阻塞事件循環
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_instant_bookings():
-            session = Session()
-            try:
-                # 檢查 tenMinuteReminderShown 列是否存在
-                column_exists = False
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
+            with Session() as session:
                 try:
-                    result = session.execute(text("""
-                        SELECT column_name 
-                        FROM information_schema.columns 
-                        WHERE table_name='Booking' AND column_name='tenMinuteReminderShown'
-                    """))
-                    if result.fetchone():
-                        column_exists = True
-                except:
-                    pass
-                
-                # 1. 檢查需要顯示10分鐘提醒的預約（包括即時預約、一般預約、群組預約和多人陪玩）
-                # 精確計算：結束時間在未來9-11分鐘之間（避免重複發送）
-                ten_minutes_start = now + timedelta(minutes=9)
-                ten_minutes_end = now + timedelta(minutes=11)
-                if column_exists:
-                    bookings_10min = session.execute(text("""
-                        SELECT b.id, 
-                               COALESCE(b."discordTextChannelId", b."discordEarlyTextChannelId") as text_channel_id,
-                               s."endTime", s."startTime",
-                               c.name as customer_name, p.name as partner_name,
-                               b."paymentInfo"->>'isInstantBooking' as is_instant_booking, 'SINGLE' as booking_type
-                        FROM "Booking" b
-                        JOIN "Schedule" s ON b."scheduleId" = s.id
-                        JOIN "Customer" c ON b."customerId" = c.id
-                        JOIN "Partner" p ON s."partnerId" = p.id
-                        WHERE b.status = 'CONFIRMED'
-                        AND (b."discordTextChannelId" IS NOT NULL OR b."discordEarlyTextChannelId" IS NOT NULL)
-                        AND b."tenMinuteReminderShown" = false
-                        AND b."groupBookingId" IS NULL
-                        AND b."multiPlayerBookingId" IS NULL
-                        AND s."startTime" <= :now
-                        AND s."endTime" >= :ten_minutes_start
-                        AND s."endTime" <= :ten_minutes_end
+                    # 檢查 tenMinuteReminderShown 列是否存在
+                    column_exists = False
+                    try:
+                        result = session.execute(text("""
+                            SELECT column_name 
+                            FROM information_schema.columns 
+                            WHERE table_name='Booking' AND column_name='tenMinuteReminderShown'
+                        """))
+                        if result.fetchone():
+                            column_exists = True
+                    except:
+                        pass
+                    
+                    # 1. 檢查需要顯示10分鐘提醒的預約（包括即時預約、一般預約、群組預約和多人陪玩）
+                    # 精確計算：結束時間在未來9-11分鐘之間（避免重複發送）
+                    ten_minutes_start = now + timedelta(minutes=9)
+                    ten_minutes_end = now + timedelta(minutes=11)
+                    if column_exists:
+                        bookings_10min = session.execute(text("""
+                            SELECT b.id, 
+                                   COALESCE(b."discordTextChannelId", b."discordEarlyTextChannelId") as text_channel_id,
+                                   s."endTime", s."startTime",
+                                   c.name as customer_name, p.name as partner_name,
+                                   b."paymentInfo"->>'isInstantBooking' as is_instant_booking, 'SINGLE' as booking_type
+                            FROM "Booking" b
+                            JOIN "Schedule" s ON b."scheduleId" = s.id
+                            JOIN "Customer" c ON b."customerId" = c.id
+                            JOIN "Partner" p ON s."partnerId" = p.id
+                            WHERE b.status = 'CONFIRMED'
+                            AND (b."discordTextChannelId" IS NOT NULL OR b."discordEarlyTextChannelId" IS NOT NULL)
+                            AND b."tenMinuteReminderShown" = false
+                            AND b."groupBookingId" IS NULL
+                            AND b."multiPlayerBookingId" IS NULL
+                            AND s."startTime" <= :now
+                            AND s."endTime" >= :ten_minutes_start
+                            AND s."endTime" <= :ten_minutes_end
+                        """), {'now': now, 'ten_minutes_start': ten_minutes_start, 'ten_minutes_end': ten_minutes_end}).fetchall()
+                    else:
+                        # 如果列不存在，使用簡化查詢（不檢查是否已顯示過提醒）
+                        bookings_10min = session.execute(text("""
+                            SELECT b.id, 
+                                   COALESCE(b."discordTextChannelId", b."discordEarlyTextChannelId") as text_channel_id,
+                                   s."endTime", s."startTime",
+                                   c.name as customer_name, p.name as partner_name,
+                                   b."paymentInfo"->>'isInstantBooking' as is_instant_booking, 'SINGLE' as booking_type
+                            FROM "Booking" b
+                            JOIN "Schedule" s ON b."scheduleId" = s.id
+                            JOIN "Customer" c ON b."customerId" = c.id
+                            JOIN "Partner" p ON s."partnerId" = p.id
+                            WHERE b.status = 'CONFIRMED'
+                            AND (b."discordTextChannelId" IS NOT NULL OR b."discordEarlyTextChannelId" IS NOT NULL)
+                            AND b."groupBookingId" IS NULL
+                            AND b."multiPlayerBookingId" IS NULL
+                            AND s."startTime" <= :now
+                            AND s."endTime" >= :ten_minutes_start
+                            AND s."endTime" <= :ten_minutes_end
+                        """), {'now': now, 'ten_minutes_start': ten_minutes_start, 'ten_minutes_end': ten_minutes_end}).fetchall()
+                    
+                    # 群組預約 10 分鐘提醒
+                    # 🔥 必須滿足以下條件：
+                    # 1. 預約已經開始（startTime <= now）
+                    # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
+                    # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
+                    # 4. 結束時間在未來9-11分鐘之間
+                    group_bookings_10min = session.execute(text("""
+                        SELECT gb.id, gb."discordTextChannelId", gb."endTime", gb."startTime", gb.title,
+                               'GROUP' as booking_type
+                        FROM "GroupBooking" gb
+                        WHERE gb.status IN ('ACTIVE', 'FULL')
+                        AND gb."discordTextChannelId" IS NOT NULL
+                        AND gb."discordVoiceChannelId" IS NOT NULL
+                        AND gb."startTime" <= :now
+                        AND gb."endTime" >= :ten_minutes_start
+                        AND gb."endTime" <= :ten_minutes_end
                     """), {'now': now, 'ten_minutes_start': ten_minutes_start, 'ten_minutes_end': ten_minutes_end}).fetchall()
-                else:
-                    # 如果列不存在，使用簡化查詢（不檢查是否已顯示過提醒）
-                    bookings_10min = session.execute(text("""
-                        SELECT b.id, 
-                               COALESCE(b."discordTextChannelId", b."discordEarlyTextChannelId") as text_channel_id,
-                               s."endTime", s."startTime",
-                               c.name as customer_name, p.name as partner_name,
-                               b."paymentInfo"->>'isInstantBooking' as is_instant_booking, 'SINGLE' as booking_type
-                        FROM "Booking" b
-                        JOIN "Schedule" s ON b."scheduleId" = s.id
-                        JOIN "Customer" c ON b."customerId" = c.id
-                        JOIN "Partner" p ON s."partnerId" = p.id
-                        WHERE b.status = 'CONFIRMED'
-                        AND (b."discordTextChannelId" IS NOT NULL OR b."discordEarlyTextChannelId" IS NOT NULL)
-                        AND b."groupBookingId" IS NULL
-                        AND b."multiPlayerBookingId" IS NULL
-                        AND s."startTime" <= :now
-                        AND s."endTime" >= :ten_minutes_start
-                        AND s."endTime" <= :ten_minutes_end
+                    
+                    # 多人陪玩 10 分鐘提醒
+                    # 🔥 必須滿足以下條件：
+                    # 1. 預約已經開始（startTime <= now）
+                    # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
+                    # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
+                    # 4. 結束時間在未來9-11分鐘之間
+                    multi_player_bookings_10min = session.execute(text("""
+                        SELECT mpb.id, mpb."discordTextChannelId", mpb."endTime", mpb."startTime",
+                               'MULTI_PLAYER' as booking_type
+                        FROM "MultiPlayerBooking" mpb
+                        WHERE mpb.status = 'ACTIVE'
+                        AND mpb."discordTextChannelId" IS NOT NULL
+                        AND mpb."discordVoiceChannelId" IS NOT NULL
+                        AND mpb."startTime" <= :now
+                        AND mpb."endTime" >= :ten_minutes_start
+                        AND mpb."endTime" <= :ten_minutes_end
                     """), {'now': now, 'ten_minutes_start': ten_minutes_start, 'ten_minutes_end': ten_minutes_end}).fetchall()
-                
-                # 群組預約 10 分鐘提醒
-                # 🔥 必須滿足以下條件：
-                # 1. 預約已經開始（startTime <= now）
-                # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
-                # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
-                # 4. 結束時間在未來9-11分鐘之間
-                group_bookings_10min = session.execute(text("""
-                    SELECT gb.id, gb."discordTextChannelId", gb."endTime", gb."startTime", gb.title,
-                           'GROUP' as booking_type
-                    FROM "GroupBooking" gb
-                    WHERE gb.status IN ('ACTIVE', 'FULL')
-                    AND gb."discordTextChannelId" IS NOT NULL
-                    AND gb."discordVoiceChannelId" IS NOT NULL
-                    AND gb."startTime" <= :now
-                    AND gb."endTime" >= :ten_minutes_start
-                    AND gb."endTime" <= :ten_minutes_end
-                """), {'now': now, 'ten_minutes_start': ten_minutes_start, 'ten_minutes_end': ten_minutes_end}).fetchall()
-                
-                # 多人陪玩 10 分鐘提醒
-                # 🔥 必須滿足以下條件：
-                # 1. 預約已經開始（startTime <= now）
-                # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
-                # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
-                # 4. 結束時間在未來9-11分鐘之間
-                multi_player_bookings_10min = session.execute(text("""
-                    SELECT mpb.id, mpb."discordTextChannelId", mpb."endTime", mpb."startTime",
-                           'MULTI_PLAYER' as booking_type
-                    FROM "MultiPlayerBooking" mpb
-                    WHERE mpb.status = 'ACTIVE'
-                    AND mpb."discordTextChannelId" IS NOT NULL
-                    AND mpb."discordVoiceChannelId" IS NOT NULL
-                    AND mpb."startTime" <= :now
-                    AND mpb."endTime" >= :ten_minutes_start
-                    AND mpb."endTime" <= :ten_minutes_end
-                """), {'now': now, 'ten_minutes_start': ten_minutes_start, 'ten_minutes_end': ten_minutes_end}).fetchall()
-                
-                return column_exists, list(bookings_10min), list(group_bookings_10min), list(multi_player_bookings_10min)
-            finally:
-                session.close()
+                    
+                    return column_exists, list(bookings_10min), list(group_bookings_10min), list(multi_player_bookings_10min)
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    session.rollback()
+                    raise
         
         # 在線程池中執行資料庫查詢
         column_exists, bookings_10min, group_bookings_10min, multi_player_bookings_10min = await asyncio.to_thread(query_instant_bookings)
@@ -6425,84 +6541,88 @@ async def check_instant_booking_timing():
                 print(f"⚠️ 發送多人陪玩10分鐘提醒失敗: {e}")
         
         # 2. 檢查需要顯示5分鐘延長按鈕的預約（包括即時預約、一般預約、群組預約和多人陪玩）
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_bookings_5min():
-            session = Session()
-            try:
-                # 精確計算：結束時間在未來4-6分鐘之間（避免重複發送）
-                five_minutes_start = now + timedelta(minutes=4)
-                five_minutes_end = now + timedelta(minutes=6)
-                # 一般預約和即時預約 5 分鐘延長按鈕
-                # 🔥 必須滿足以下條件：
-                # 1. 預約已經開始（startTime <= now）
-                # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
-                # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
-                # 4. 結束時間在未來4-6分鐘之間
-                # 5. 總時長超過30分鐘（endTime - startTime > 30分鐘）
-                bookings_5min = session.execute(text("""
-                    SELECT b.id, 
-                           COALESCE(b."discordTextChannelId", b."discordEarlyTextChannelId") as text_channel_id,
-                           b."discordVoiceChannelId", s."endTime", s."startTime", 
-                           c.name as customer_name, p.name as partner_name,
-                           b."paymentInfo"->>'isInstantBooking' as is_instant_booking, 'SINGLE' as booking_type
-                    FROM "Booking" b
-                    JOIN "Schedule" s ON b."scheduleId" = s.id
-                    JOIN "Customer" c ON b."customerId" = c.id
-                    JOIN "Partner" p ON s."partnerId" = p.id
-                    WHERE b.status = 'CONFIRMED'
-                    AND (b."discordTextChannelId" IS NOT NULL OR b."discordEarlyTextChannelId" IS NOT NULL)
-                    AND b."discordVoiceChannelId" IS NOT NULL
-                    AND b."extensionButtonShown" = false
-                    AND b."groupBookingId" IS NULL
-                    AND b."multiPlayerBookingId" IS NULL
-                    AND s."startTime" <= :now
-                    AND s."endTime" >= :five_minutes_start
-                    AND s."endTime" <= :five_minutes_end
-                    AND EXTRACT(EPOCH FROM (s."endTime" - s."startTime")) / 60 > 30
-                """), {'now': now, 'five_minutes_start': five_minutes_start, 'five_minutes_end': five_minutes_end}).fetchall()
-                
-                # 群組預約 5 分鐘延長按鈕
-                # 🔥 必須滿足以下條件：
-                # 1. 預約已經開始（startTime <= now）
-                # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
-                # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
-                # 4. 結束時間在未來4-6分鐘之間
-                # 5. 總時長超過30分鐘（endTime - startTime > 30分鐘）
-                group_bookings_5min = session.execute(text("""
-                    SELECT gb.id, gb."discordTextChannelId", gb."discordVoiceChannelId", gb."endTime", gb."startTime", gb.title,
-                           'GROUP' as booking_type
-                    FROM "GroupBooking" gb
-                    WHERE gb.status IN ('ACTIVE', 'FULL')
-                    AND gb."discordTextChannelId" IS NOT NULL
-                    AND gb."discordVoiceChannelId" IS NOT NULL
-                    AND gb."startTime" <= :now
-                    AND gb."endTime" >= :five_minutes_start
-                    AND gb."endTime" <= :five_minutes_end
-                    AND EXTRACT(EPOCH FROM (gb."endTime" - gb."startTime")) / 60 > 30
-                """), {'now': now, 'five_minutes_start': five_minutes_start, 'five_minutes_end': five_minutes_end}).fetchall()
-                
-                # 多人陪玩 5 分鐘延長按鈕
-                # 🔥 必須滿足以下條件：
-                # 1. 預約已經開始（startTime <= now）
-                # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
-                # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
-                # 4. 結束時間在未來4-6分鐘之間
-                # 5. 總時長超過30分鐘（endTime - startTime > 30分鐘）
-                multi_player_bookings_5min = session.execute(text("""
-                    SELECT mpb.id, mpb."discordTextChannelId", mpb."discordVoiceChannelId", mpb."endTime", mpb."startTime",
-                           'MULTI_PLAYER' as booking_type
-                    FROM "MultiPlayerBooking" mpb
-                    WHERE mpb.status = 'ACTIVE'
-                    AND mpb."discordTextChannelId" IS NOT NULL
-                    AND mpb."discordVoiceChannelId" IS NOT NULL
-                    AND mpb."startTime" <= :now
-                    AND mpb."endTime" >= :five_minutes_start
-                    AND mpb."endTime" <= :five_minutes_end
-                    AND EXTRACT(EPOCH FROM (mpb."endTime" - mpb."startTime")) / 60 > 30
-                """), {'now': now, 'five_minutes_start': five_minutes_start, 'five_minutes_end': five_minutes_end}).fetchall()
-                
-                return list(bookings_5min), list(group_bookings_5min), list(multi_player_bookings_5min)
-            finally:
-                session.close()
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
+            with Session() as session:
+                try:
+                    # 精確計算：結束時間在未來4-6分鐘之間（避免重複發送）
+                    five_minutes_start = now + timedelta(minutes=4)
+                    five_minutes_end = now + timedelta(minutes=6)
+                    # 一般預約和即時預約 5 分鐘延長按鈕
+                    # 🔥 必須滿足以下條件：
+                    # 1. 預約已經開始（startTime <= now）
+                    # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
+                    # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
+                    # 4. 結束時間在未來4-6分鐘之間
+                    # 5. 總時長超過30分鐘（endTime - startTime > 30分鐘）
+                    bookings_5min = session.execute(text("""
+                        SELECT b.id, 
+                               COALESCE(b."discordTextChannelId", b."discordEarlyTextChannelId") as text_channel_id,
+                               b."discordVoiceChannelId", s."endTime", s."startTime", 
+                               c.name as customer_name, p.name as partner_name,
+                               b."paymentInfo"->>'isInstantBooking' as is_instant_booking, 'SINGLE' as booking_type
+                        FROM "Booking" b
+                        JOIN "Schedule" s ON b."scheduleId" = s.id
+                        JOIN "Customer" c ON b."customerId" = c.id
+                        JOIN "Partner" p ON s."partnerId" = p.id
+                        WHERE b.status = 'CONFIRMED'
+                        AND (b."discordTextChannelId" IS NOT NULL OR b."discordEarlyTextChannelId" IS NOT NULL)
+                        AND b."discordVoiceChannelId" IS NOT NULL
+                        AND b."extensionButtonShown" = false
+                        AND b."groupBookingId" IS NULL
+                        AND b."multiPlayerBookingId" IS NULL
+                        AND s."startTime" <= :now
+                        AND s."endTime" >= :five_minutes_start
+                        AND s."endTime" <= :five_minutes_end
+                        AND EXTRACT(EPOCH FROM (s."endTime" - s."startTime")) / 60 > 30
+                    """), {'now': now, 'five_minutes_start': five_minutes_start, 'five_minutes_end': five_minutes_end}).fetchall()
+                    
+                    # 群組預約 5 分鐘延長按鈕
+                    # 🔥 必須滿足以下條件：
+                    # 1. 預約已經開始（startTime <= now）
+                    # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
+                    # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
+                    # 4. 結束時間在未來4-6分鐘之間
+                    # 5. 總時長超過30分鐘（endTime - startTime > 30分鐘）
+                    group_bookings_5min = session.execute(text("""
+                        SELECT gb.id, gb."discordTextChannelId", gb."discordVoiceChannelId", gb."endTime", gb."startTime", gb.title,
+                               'GROUP' as booking_type
+                        FROM "GroupBooking" gb
+                        WHERE gb.status IN ('ACTIVE', 'FULL')
+                        AND gb."discordTextChannelId" IS NOT NULL
+                        AND gb."discordVoiceChannelId" IS NOT NULL
+                        AND gb."startTime" <= :now
+                        AND gb."endTime" >= :five_minutes_start
+                        AND gb."endTime" <= :five_minutes_end
+                        AND EXTRACT(EPOCH FROM (gb."endTime" - gb."startTime")) / 60 > 30
+                    """), {'now': now, 'five_minutes_start': five_minutes_start, 'five_minutes_end': five_minutes_end}).fetchall()
+                    
+                    # 多人陪玩 5 分鐘延長按鈕
+                    # 🔥 必須滿足以下條件：
+                    # 1. 預約已經開始（startTime <= now）
+                    # 2. 語音頻道已經創建（discordVoiceChannelId IS NOT NULL）
+                    # 3. 文字頻道已經創建（discordTextChannelId IS NOT NULL）
+                    # 4. 結束時間在未來4-6分鐘之間
+                    # 5. 總時長超過30分鐘（endTime - startTime > 30分鐘）
+                    multi_player_bookings_5min = session.execute(text("""
+                        SELECT mpb.id, mpb."discordTextChannelId", mpb."discordVoiceChannelId", mpb."endTime", mpb."startTime",
+                               'MULTI_PLAYER' as booking_type
+                        FROM "MultiPlayerBooking" mpb
+                        WHERE mpb.status = 'ACTIVE'
+                        AND mpb."discordTextChannelId" IS NOT NULL
+                        AND mpb."discordVoiceChannelId" IS NOT NULL
+                        AND mpb."startTime" <= :now
+                        AND mpb."endTime" >= :five_minutes_start
+                        AND mpb."endTime" <= :five_minutes_end
+                        AND EXTRACT(EPOCH FROM (mpb."endTime" - mpb."startTime")) / 60 > 30
+                    """), {'now': now, 'five_minutes_start': five_minutes_start, 'five_minutes_end': five_minutes_end}).fetchall()
+                    
+                    return list(bookings_5min), list(group_bookings_5min), list(multi_player_bookings_5min)
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    session.rollback()
+                    raise
         
         bookings_5min, group_bookings_5min, multi_player_bookings_5min = await asyncio.to_thread(query_bookings_5min)
         
@@ -6634,27 +6754,31 @@ async def check_instant_booking_timing():
                 print(f"⚠️ 發送多人陪玩5分鐘延長按鈕失敗: {e}")
         
         # 2.5. 檢查需要顯示1分鐘提醒的預約（包括多人陪玩）
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_bookings_1min():
-            session = Session()
-            try:
-                # 精確計算：結束時間在未來0.5-1.5分鐘之間（避免重複發送）
-                one_minute_start = now + timedelta(seconds=30)
-                one_minute_end = now + timedelta(minutes=1, seconds=30)
-                
-                # 多人陪玩 1 分鐘提醒
-                multi_player_bookings_1min = session.execute(text("""
-                    SELECT mpb.id, mpb."discordTextChannelId", mpb."endTime",
-                           'MULTI_PLAYER' as booking_type
-                    FROM "MultiPlayerBooking" mpb
-                    WHERE mpb.status = 'ACTIVE'
-                    AND mpb."discordTextChannelId" IS NOT NULL
-                    AND mpb."endTime" >= :one_minute_start
-                    AND mpb."endTime" <= :one_minute_end
-                """), {'one_minute_start': one_minute_start, 'one_minute_end': one_minute_end}).fetchall()
-                
-                return list(multi_player_bookings_1min)
-            finally:
-                session.close()
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
+            with Session() as session:
+                try:
+                    # 精確計算：結束時間在未來0.5-1.5分鐘之間（避免重複發送）
+                    one_minute_start = now + timedelta(seconds=30)
+                    one_minute_end = now + timedelta(minutes=1, seconds=30)
+                    
+                    # 多人陪玩 1 分鐘提醒
+                    multi_player_bookings_1min = session.execute(text("""
+                        SELECT mpb.id, mpb."discordTextChannelId", mpb."endTime",
+                               'MULTI_PLAYER' as booking_type
+                        FROM "MultiPlayerBooking" mpb
+                        WHERE mpb.status = 'ACTIVE'
+                        AND mpb."discordTextChannelId" IS NOT NULL
+                        AND mpb."endTime" >= :one_minute_start
+                        AND mpb."endTime" <= :one_minute_end
+                    """), {'one_minute_start': one_minute_start, 'one_minute_end': one_minute_end}).fetchall()
+                    
+                    return list(multi_player_bookings_1min)
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    session.rollback()
+                    raise
         
         multi_player_bookings_1min = await asyncio.to_thread(query_bookings_1min)
         
@@ -6686,54 +6810,58 @@ async def check_instant_booking_timing():
                 print(f"⚠️ 發送多人陪玩1分鐘提醒失敗: {e}")
         
         # 3. 檢查需要結束的預約（時間結束，包括即時預約、一般預約、群組預約和多人陪玩）
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_bookings_ended():
-            session = Session()
-            try:
-                # 一般預約和即時預約
-                bookings_ended = session.execute(text("""
-                    SELECT b.id, b."discordVoiceChannelId", 
-                           COALESCE(b."discordTextChannelId", b."discordEarlyTextChannelId") as text_channel_id,
-                           b."ratingCompleted",
-                           c.name as customer_name, p.name as partner_name, s."endTime",
-                           b."paymentInfo"->>'isInstantBooking' as is_instant_booking,
-                           'SINGLE' as booking_type
-                    FROM "Booking" b
-                    JOIN "Customer" c ON b."customerId" = c.id
-                    JOIN "Schedule" s ON b."scheduleId" = s.id
-                    JOIN "Partner" p ON s."partnerId" = p.id
-                    WHERE b.status = 'CONFIRMED'
-                    AND b."discordVoiceChannelId" IS NOT NULL
-                    AND (b."discordTextChannelId" IS NOT NULL OR b."discordEarlyTextChannelId" IS NOT NULL)
-                    AND b."groupBookingId" IS NULL
-                    AND b."multiPlayerBookingId" IS NULL
-                    AND s."endTime" <= :now
-                """), {'now': now}).fetchall()
-                
-                # 群組預約
-                group_bookings_ended = session.execute(text("""
-                    SELECT gb.id, gb."discordVoiceChannelId", gb."discordTextChannelId",
-                           gb."endTime", gb.title,
-                           'GROUP' as booking_type
-                    FROM "GroupBooking" gb
-                    WHERE gb.status = 'ACTIVE'
-                    AND gb."discordVoiceChannelId" IS NOT NULL
-                    AND gb."endTime" <= :now
-                """), {'now': now}).fetchall()
-                
-                # 多人陪玩
-                multi_player_bookings_ended = session.execute(text("""
-                    SELECT mpb.id, mpb."discordVoiceChannelId", mpb."discordTextChannelId",
-                           mpb."endTime",
-                           'MULTI_PLAYER' as booking_type
-                    FROM "MultiPlayerBooking" mpb
-                    WHERE mpb.status = 'ACTIVE'
-                    AND mpb."discordVoiceChannelId" IS NOT NULL
-                    AND mpb."endTime" <= :now
-                """), {'now': now}).fetchall()
-                
-                return list(bookings_ended), list(group_bookings_ended), list(multi_player_bookings_ended)
-            finally:
-                session.close()
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
+            with Session() as session:
+                try:
+                    # 一般預約和即時預約
+                    bookings_ended = session.execute(text("""
+                        SELECT b.id, b."discordVoiceChannelId", 
+                               COALESCE(b."discordTextChannelId", b."discordEarlyTextChannelId") as text_channel_id,
+                               b."ratingCompleted",
+                               c.name as customer_name, p.name as partner_name, s."endTime",
+                               b."paymentInfo"->>'isInstantBooking' as is_instant_booking,
+                               'SINGLE' as booking_type
+                        FROM "Booking" b
+                        JOIN "Customer" c ON b."customerId" = c.id
+                        JOIN "Schedule" s ON b."scheduleId" = s.id
+                        JOIN "Partner" p ON s."partnerId" = p.id
+                        WHERE b.status = 'CONFIRMED'
+                        AND b."discordVoiceChannelId" IS NOT NULL
+                        AND (b."discordTextChannelId" IS NOT NULL OR b."discordEarlyTextChannelId" IS NOT NULL)
+                        AND b."groupBookingId" IS NULL
+                        AND b."multiPlayerBookingId" IS NULL
+                        AND s."endTime" <= :now
+                    """), {'now': now}).fetchall()
+                    
+                    # 群組預約
+                    group_bookings_ended = session.execute(text("""
+                        SELECT gb.id, gb."discordVoiceChannelId", gb."discordTextChannelId",
+                               gb."endTime", gb.title,
+                               'GROUP' as booking_type
+                        FROM "GroupBooking" gb
+                        WHERE gb.status = 'ACTIVE'
+                        AND gb."discordVoiceChannelId" IS NOT NULL
+                        AND gb."endTime" <= :now
+                    """), {'now': now}).fetchall()
+                    
+                    # 多人陪玩
+                    multi_player_bookings_ended = session.execute(text("""
+                        SELECT mpb.id, mpb."discordVoiceChannelId", mpb."discordTextChannelId",
+                               mpb."endTime",
+                               'MULTI_PLAYER' as booking_type
+                        FROM "MultiPlayerBooking" mpb
+                        WHERE mpb.status = 'ACTIVE'
+                        AND mpb."discordVoiceChannelId" IS NOT NULL
+                        AND mpb."endTime" <= :now
+                    """), {'now': now}).fetchall()
+                    
+                    return list(bookings_ended), list(group_bookings_ended), list(multi_player_bookings_ended)
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    session.rollback()
+                    raise
         
         bookings_ended, group_bookings_ended, multi_player_bookings_ended = await asyncio.to_thread(query_bookings_ended)
         
@@ -7117,21 +7245,25 @@ async def check_instant_booking_timing():
                 traceback.print_exc()
         
         # 4. 檢查需要清理文字頻道的預約（評價完成後，包括即時預約和一般預約）
+        # ADDED FOR TRANSACTION SAFETY: 每輪創建新 session，確保異常時 rollback
         def query_bookings_cleanup():
-            session = Session()
-            try:
-                bookings_cleanup = session.execute(text("""
-                    SELECT b.id, b."discordTextChannelId", b."ratingCompleted", b."textChannelCleaned"
-                    FROM "Booking" b
-                    WHERE b."ratingCompleted" = true
-                    AND b."textChannelCleaned" = false
-                    AND b."groupBookingId" IS NULL
-                    AND b."multiPlayerBookingId" IS NULL
-                    AND b."discordTextChannelId" IS NOT NULL
-                """)).fetchall()
-                return list(bookings_cleanup)
-            finally:
-                session.close()
+            # ADDED FOR TRANSACTION SAFETY: 使用 with Session() 確保自動關閉
+            with Session() as session:
+                try:
+                    bookings_cleanup = session.execute(text("""
+                        SELECT b.id, b."discordTextChannelId", b."ratingCompleted", b."textChannelCleaned"
+                        FROM "Booking" b
+                        WHERE b."ratingCompleted" = true
+                        AND b."textChannelCleaned" = false
+                        AND b."groupBookingId" IS NULL
+                        AND b."multiPlayerBookingId" IS NULL
+                        AND b."discordTextChannelId" IS NOT NULL
+                    """)).fetchall()
+                    return list(bookings_cleanup)
+                except Exception as e:
+                    # ADDED FOR TRANSACTION SAFETY: 確保異常時 rollback
+                    session.rollback()
+                    raise
         
         bookings_cleanup = await asyncio.to_thread(query_bookings_cleanup)
         
