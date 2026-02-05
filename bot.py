@@ -426,6 +426,33 @@ def find_member_by_discord_name(guild, discord_name):
     
     return None
 
+# --- 429 安全創建文字頻道（僅替換創建文字頻道，不影響其他 Discord API）---
+# 若 Render 因 terminal 輸出過多觸發 Cloudflare 1015，可適度減少他處 print 頻率或本函式內日誌。
+async def safe_create_text_channel(guild, name, **kwargs):
+    """
+    創建文字頻道。遇 Discord API 429 時依 retry_after 等待後重試，其他錯誤照常拋出。
+    即時預約、純聊天、多人陪玩、群組預約等皆透過此函式創建文字頻道，避免 Render 上大量創建觸發限速。
+    """
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            return await guild.create_text_channel(name=name, **kwargs)
+        except discord.HTTPException as e:
+            if e.status == 429:
+                wait = getattr(e, 'retry_after', 5.0)
+                if not isinstance(wait, (int, float)) or wait <= 0:
+                    wait = 5.0
+                wait = min(float(wait), 60.0)  # 最多等 60 秒
+                if attempt < max_retries - 1:
+                    print(f"⚠️ Discord API 429 限速，等待 {wait:.1f} 秒後重試創建文字頻道...")
+                    await asyncio.sleep(wait)
+                else:
+                    print(f"❌ 創建文字頻道 429，已重試 {max_retries} 次，放棄")
+                    raise
+            else:
+                raise
+    return None  # unreachable
+
 # --- 創建預約文字頻道函數 ---
 async def create_booking_text_channel(booking_id, customer_discord, partner_discord, start_time, end_time):
     """為預約創建文字頻道"""
@@ -519,8 +546,9 @@ async def create_booking_text_channel(booking_id, customer_discord, partner_disc
                 print("❌ 找不到任何分類")
                 return None
         
-        # 創建文字頻道
-        text_channel = await guild.create_text_channel(
+        # 創建文字頻道（429 安全）
+        text_channel = await safe_create_text_channel(
+            guild,
             name=channel_name,
             overwrites=overwrites,
             category=category
@@ -1166,8 +1194,9 @@ async def create_group_booking_text_channel(group_booking_id, customer_discords,
         for partner_member in partner_members:
             overwrites[partner_member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         
-        # 創建文字頻道
-        text_channel = await guild.create_text_channel(
+        # 創建文字頻道（429 安全）
+        text_channel = await safe_create_text_channel(
+            guild,
             name=channel_name,
             category=category,
             overwrites=overwrites
@@ -3142,9 +3171,10 @@ async def check_instant_bookings_for_text_channel():
                 if partner_member:
                     overwrites[partner_member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                 
-                # 允許在此流程建立文字頻道（移除禁止建立的阻擋）
+                # 允許在此流程建立文字頻道（429 安全，即時預約）
                 try:
-                    text_channel = await guild.create_text_channel(
+                    text_channel = await safe_create_text_channel(
+                        guild,
                         name=channel_name,
                         category=category,
                         overwrites=overwrites
@@ -3740,9 +3770,10 @@ async def check_regular_bookings_for_text_channel():
                     print(f"⚠️ 文字頻道已存在: {text_channel_name}")
                     continue
                 
-                # 允許建立文字頻道（移除禁止建立的阻擋）
+                # 允許建立文字頻道（429 安全，一般預約）
                 try:
-                    text_channel = await guild.create_text_channel(
+                    text_channel = await safe_create_text_channel(
+                        guild,
                         name=text_channel_name,
                         overwrites=overwrites,
                         category=category
@@ -5976,9 +6007,10 @@ async def check_bookings():
                     if partner_member:
                         overwrites[partner_member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                     
-                    # 🔥 為一般預約創建文字頻道（用於倒數計時和評價系統）
+                    # 🔥 為一般預約創建文字頻道（429 安全，用於倒數計時和評價系統）
                     try:
-                        text_channel = await guild.create_text_channel(
+                        text_channel = await safe_create_text_channel(
+                            guild,
                             name=channel_name,
                             category=category,
                             overwrites=overwrites
@@ -9185,7 +9217,7 @@ async def createvc(interaction: discord.Interaction, members: str, minutes: int,
 
         category = discord.utils.get(interaction.guild.categories, name="語音頻道")
         vc = await interaction.guild.create_voice_channel(name=animal_channel_name, overwrites=overwrites, user_limit=limit, category=category)
-        text_channel = await interaction.guild.create_text_channel(name="🔒匿名文字區", overwrites=overwrites, category=category)
+        text_channel = await safe_create_text_channel(interaction.guild, "🔒匿名文字區", overwrites=overwrites, category=category)
 
         with Session() as s:
             # 確保記錄兩個不同的用戶
@@ -9520,10 +9552,11 @@ async def createvc_now(interaction: discord.Interaction, customer: str, partner:
                     category=category
                 )
                 
-                # 創建文字頻道
-                text_channel = await guild.create_text_channel(
-                    name="🔒匿名文字區", 
-                    overwrites=overwrites, 
+                # 創建文字頻道（429 安全）
+                text_channel = await safe_create_text_channel(
+                    guild,
+                    name="🔒匿名文字區",
+                    overwrites=overwrites,
                     category=category
                 )
                 
@@ -9920,8 +9953,9 @@ def pair_users():
                 user2: discord.PermissionOverwrite(view_channel=True, connect=True, speak=True),
             }
 
-            # 創建文字頻道（立即創建）
-            text_channel = await guild.create_text_channel(
+            # 創建文字頻道（429 安全，立即創建）
+            text_channel = await safe_create_text_channel(
+                guild,
                 name=f"{animal}聊天",
                 category=category,
                 overwrites=overwrites
